@@ -89,8 +89,8 @@ make -j$(sysctl -n hw.ncpu) && sudo make install
 ### Compile
 
 ```bash
-git clone https://github.com/sova-nova/pq-file-transfer.git
-cd pq-file-transfer && mkdir build && cd build
+git clone https://github.com/sova-nova/lattice-pq.git
+cd lattice-pq && mkdir build && cd build
 cmake ..            # macOS: cmake -DCMAKE_PREFIX_PATH=$(brew --prefix qt) ..
 cmake --build . -j
 ```
