@@ -4,11 +4,12 @@ Lattice (formerly PQ File Transfer) is a cross-platform messenger and file trans
 
 ## Architecture
 
-- **Client**: Qt 6 desktop application. It generates keys, manages contacts, encrypts, signs and uploads, and downloads, verifies and decrypts.
-- **Relay server**: a small TCP store-and-forward server. It holds encrypted transfers until the recipient fetches them, or for 24 hours at most.
-- **Protocol**: length-prefixed binary messages (`[u32 length][u8 type][payload]`) with chunked transfer.
+- **Client** (`pq-client`): a Qt 6 desktop application with three tabs. **Home** gives an overview, **Chats** holds one-to-one chats, groups and disappearing Private chats (with files attached to messages), and **Files** sends and receives a file by link, without any setup. The client generates and protects your keys, manages contacts, and does all the encrypting, signing and checking.
+- **Relay server** (`pq-server`): a small store-and-forward server you run yourself. It holds sealed messages in mailboxes until their owners collect them, keeps encrypted chat archives and attachments, and holds Files-tab transfers until they are fetched (24 hours at most). It never sees contents or who is writing to whom.
+- **Connections**: every connection to a relay is encrypted with a post-quantum handshake (ML-KEM-768 with X25519), and the relay proves its identity before the app sends anything. Inside that sit length-prefixed binary messages (`[u32 length][u8 type][payload]`).
+- **`pq-relay-check`**: a command-line check that a relay is reachable and genuine.
 
-A transfer works like this. The sender uploads and receives a **transfer ID**, then gives that ID to the recipient through any channel. The recipient downloads with the ID, and the server deletes its copy once the recipient confirms the file decrypted and verified correctly.
+A Files-tab transfer works like this. The sender uploads and receives a **transfer ID**, then gives that ID to the recipient through any channel. The recipient downloads with the ID, and the server deletes its copy once the recipient confirms the file decrypted and verified correctly. Messaging is described [further down](#messaging-saved-chats).
 
 ## Cryptography
 
@@ -16,11 +17,15 @@ A transfer works like this. The sender uploads and receives a **transfer ID**, t
 |---|---|---|
 | Key encapsulation | ML-KEM-768 | FIPS 203 |
 | Signatures | ML-DSA-65 | FIPS 204 |
+| Classical key exchange, combined with ML-KEM (relay connections, one-time prekeys) | X25519 | RFC 7748 |
 | Symmetric encryption | AES-256-GCM | NIST SP 800-38D |
 | Key derivation | HKDF-SHA256 | RFC 5869 |
+| Passphrase stretching | scrypt (128 MiB) | RFC 7914 |
 | Fingerprints | SHA-256 of the ML-DSA public key | FIPS 180-4 |
 
-### How a transfer is protected
+### How a Files-tab transfer is protected
+
+(Messages and chat files are protected differently, with forward secrecy: see [what protects your messages](#what-protects-your-messages).)
 
 1. The sender encapsulates to the recipient's ML-KEM public key and gets a fresh shared secret for this transfer.
 2. Two AES-256 keys are derived from it, one for file data and one for metadata. The HKDF salt is the SHA-256 hash of the public header (sizes, KEM ciphertext, nonce), so changing any header field breaks decryption.
@@ -35,7 +40,7 @@ A transfer works like this. The sender uploads and receives a **transfer ID**, t
 - **Integrity**: any change to the header or chunks, or any truncation, is detected, and no partial output is kept.
 - **Metadata privacy**: the server sees file size, timing and IP addresses, but not file names or sender identity.
 - **Per-transfer keys**: each transfer uses a fresh encapsulation, so the keys of one transfer reveal nothing about another.
-- **No forward secrecy**: transfers are encrypted to the recipient's long-term key. Anyone who later obtains a recipient's `private_kem` file, together with a stored ciphertext, can decrypt it. That is why the private keys can be protected by a passphrase (see below).
+- **No forward secrecy for Files-tab transfers** (chat messages have it): these transfers are encrypted to the recipient's long-term key. Anyone who later obtains a recipient's `private_kem` file, together with a stored ciphertext, can decrypt it. That is why the private keys can be protected by a passphrase (see below).
 
 ### Trust model
 
@@ -52,6 +57,7 @@ Anyone who has a transfer ID can download the ciphertext, but they can't decrypt
 | OpenSSL | AES-GCM, HKDF, scrypt, SHA-256, RNG | 1.1.1+ (3.x recommended) |
 | SQLite 3 | The relay's mailbox storage (server and tests) | 3.35+ |
 | QtKeychain | Remembering the passphrase in the OS keychain (client only, optional) | 0.14+ built for Qt 6 |
+| Qt SVG | Icons in the app (client only, optional) | same as Qt |
 | CMake | Build system | 3.16+ |
 | C++17 compiler | GCC 9+, Clang 10+, MSVC 2019+ | |
 
@@ -147,14 +153,14 @@ The Windows build has not been tested yet.
 ./pq-server [--port 9000] [--bind ADDR] [--storage DIR] [--quota-gb 50]
 ```
 
-One server, one port, two protocols. It tells them apart by a connection's first message, so existing file-transfer clients keep working while the new mailbox features are built.
+One server, one port, two services. Every connection first sets up the encrypted channel (see **Encrypted connections** under [the mailbox relay](#the-mailbox-relay)); the server then tells the two apart by the first message inside it.
 
-- **File transfers (protocol v2).** Transfers are kept in a per-user temporary directory, which you can override with `--storage` or `PQ_STORAGE_DIR`. Each transfer is deleted once its recipient confirms it, or 24 hours after it was uploaded. Complete transfers survive a restart, and their 24 hours keep counting while the server is down.
-- **Mailboxes (protocol v3).** Sealed envelopes are held until their owner collects them. State lives in `<storage>/v3`, which holds the database and **the relay's signing key**. Back that folder up (see below).
+- **File transfers (the Files tab, protocol v2).** Transfers are kept in a per-user temporary directory, which you can override with `--storage` or `PQ_STORAGE_DIR`. Each transfer is deleted once its recipient confirms it, or 24 hours after it was uploaded. Complete transfers survive a restart, and their 24 hours keep counting while the server is down.
+- **Messaging (protocol v3): mailboxes, archives, prekeys and attachments.** Sealed envelopes are held until their owner collects them. State lives in `<storage>/v3`, which holds the database and **the relay's signing key**. Back that folder up (see below).
 
 `--bind ADDR` limits the server to one IPv4 address. If you reach it over WireGuard, bind it to the tunnel address (for example `--bind 10.8.0.1`) so that it never listens on your LAN or the internet, even if a firewall rule is wrong. The default, `0.0.0.0`, listens on every interface.
 
-To reach the server over the internet, forward its port, or run it on a small VPS. Traffic to the server is not TLS-encrypted, but everything sensitive is already end-to-end encrypted. An observer can see sizes, timing and transfer IDs.
+To reach the server over the internet, forward its port, or run it on a small VPS. Every connection is encrypted and the relay proves its identity first, so a VPN is no longer needed for privacy. An observer can still see that you are talking to the relay, and roughly how much and when. WireGuard remains a good extra layer if you'd rather not expose the port at all.
 
 #### The mailbox relay
 
@@ -170,7 +176,7 @@ It prints a one-time code and a ready-to-paste invite string, `pqft-relay://10.8
 
 It also prints `Relay state:`, the folder it used, and the Relay ID, which must equal the one the running relay printed at startup. If the storage has no relay identity yet, `--create-invite` refuses instead of silently creating a second identity (a different `--storage` is the usual cause; clients would report "does not match the one you pinned"). Add `--allow-new-identity` only for a brand-new relay that has never been started.
 
-**Members vouching for friends.** You don't have to make every invite yourself. Anyone with a mailbox on your relay can press **Settings… → Relay invites…** in the app to make a one-time invite for a friend. The same dialog shows which of your invites are still unused (and when they expire), when people joined through you, and lets you cancel an unused invite if it went to the wrong place. The relay records who vouched for each person, so there is always someone accountable, and a stranger who merely knows your relay's address can't get an invite. By default one member may have 3 unused invites at once and may invite 10 people in all (`--member-invites` and `--member-invites-total`; `--member-invites 0` turns this off, leaving only your own). An invite is a secret, and like a send token it crosses the network unencrypted between the app and the relay, so keep the relay on a network you trust, such as the WireGuard tunnel.
+**Members vouching for friends.** You don't have to make every invite yourself. Anyone with a mailbox on your relay can press **Settings… → Relay invites…** in the app to make a one-time invite for a friend. The same dialog shows which of your invites are still unused (and when they expire), when people joined through you, and lets you cancel an unused invite if it went to the wrong place. The relay records who vouched for each person, so there is always someone accountable, and a stranger who merely knows your relay's address can't get an invite. By default one member may have 3 unused invites at once and may invite 10 people in all (`--member-invites` and `--member-invites-total`; `--member-invites 0` turns this off, leaving only your own). An invite is a secret: it crosses the network only inside the encrypted connection, but send it to your friend over a channel you trust.
 
 To see who is on the relay and who vouched for whom, or to undo it:
 
@@ -246,11 +252,9 @@ ExecStart=/usr/local/bin/pq-server --port 9000 --bind 10.8.0.1 --storage /var/li
 Restart=on-failure
 ```
 
-**Status.** The relay core is finished and tested, but the app can't send messages through it yet. Chats arrive in the next milestones.
-
 ### 2. Start the client and set the server
 
-Run `./pq-client`. On first run it generates your keypairs in `~/.pq-file-transfer/keys/` (`%USERPROFILE%\pq-file-transfer\keys\` on Windows), after asking whether to protect them with a passphrase (see below). On the Files tab, set the relay server with **Change** beside "Using relay …" at the bottom (as `host:port`, then **Done**); it's remembered between sessions.
+Run `./pq-client` (or **Lattice** from the app menu, once installed). On first run it generates your keypairs in `~/.pq-file-transfer/keys/` (`%USERPROFILE%\pq-file-transfer\keys\` on Windows), and the first-start guide walks you through your name, a passphrase (see below) and connecting for messaging. On the Files tab, set the relay server with **Change** beside "Using relay …" at the bottom (as `host:port`, then **Done**); it's remembered between sessions.
 
 **Back up your `keys` folder, and your passphrase if you set one.** If you lose either, you can't receive anything sent to your old keys, and every contact has to re-add you.
 
@@ -311,7 +315,7 @@ The link or ID lets anyone download the encrypted file, but only the recipient c
 
 In the **Receive a file** card, paste the share link (or the bare transfer ID) into the box and click **Download** (or press Enter). If the link names a different relay server than yours, the app asks which one to use. The file is verified, decrypted, and saved to the `downloads` folder (click **Open Downloads folder** to view it). Existing files are never overwritten. A new copy is saved as `name (1).ext`.
 
-### Messaging: one-to-one Saved chats
+### Messaging: Saved chats
 
 The **Chats** tab sends messages through a mailbox relay. Messages are end-to-end encrypted and signed, work when the other person is offline (the relay holds them until they connect), and are kept in an encrypted history on your computer.
 
@@ -327,18 +331,22 @@ The **Chats** tab sends messages through a mailbox relay. Messages are end-to-en
 
 **Revoking.** On a chat, **Block from messaging…** (in the chat's **⋯** menu) removes every card and permission that person has been given. They can no longer send you anything until you give them a new card. Their earlier messages stay in your history.
 
-**What protects your messages.**
+**Groups.** **New → New group…** makes a group of up to 16 people, including you, from contacts you can message. Members who aren't each other's contacts are introduced by you, the creator: each is labelled *Verified by you*, *Contact* or *Introduced by …*, so you can see whose key you checked yourself. A new group shows "setting up" until every member can write to every other; this goes through the creator, who passes on what's needed without being able to read it, so it waits while the creator is offline. Each message shows how many members have it, and double-click shows who. Membership is fixed when the group is made: to change it, make a new group.
 
-- Each message is a record signed with the sender's identity key: who sent it, to whom, in which conversation, when, and what they had already sent and received. The recipient checks the signature against the sender's key, and checks the record is for exactly these two people, so a message can't be forged, edited or redirected to someone else.
-- Each envelope is encrypted to the recipient alone with a fresh key. The sender's identity is inside it, so the relay can't see who is writing to whom, and sizes are padded to 4, 16 or 64 KiB.
+#### What protects your messages
+
+- Each message is a record signed with the sender's identity key: who sent it, to whom, in which conversation, when, and what they had already sent and received. The recipient checks the signature against the sender's key, and checks the record is for exactly the people in that chat, so a message can't be forged, edited or redirected to someone else.
+- **Forward secrecy.** Each envelope is sealed with three secrets combined: the recipient's long-term ML-KEM key, plus a **one-time prekey** (its own ML-KEM key and an X25519 key) taken from the recipient's relay and signed by the recipient. Once their app has received the message, it securely deletes that prekey's private half, so a recorded envelope can't be opened later even by someone who steals every key the recipient still has. The app keeps about 100 prekeys on the relay and tops them up. If they run out, a weekly-rotated last-resort prekey is used instead. If the relay claims there are none at all, the message is sealed as before and the sender is told.
+- The sender's identity is inside the envelope, so the relay can't see who is writing to whom, and sizes are padded to 4, 16 or 64 KiB.
 - Your history is encrypted on disk, row by row, with a key derived from your identity's private key. It is locked by the same passphrase as your keys and stays readable when you change that passphrase. A copy of `history.db` is useless without your keys.
 - A message whose sender's earlier message never arrived is shown, flagged as following a gap.
 
-**What it doesn't do yet.**
+#### Limits
 
-- **No forward secrecy.** Envelopes are encrypted to your long-term key, so anyone who later gets your private key and a recorded envelope can read it. One-time prekeys and an X25519 hybrid are a later milestone.
-- **History lives only on your computer.** Back up your keys folder *and* `history.db` (both in `~/.pq-file-transfer/`; the file is useless without the keys). Restoring history on a new device, a relay-held archive, and deleting chats by mutual agreement come in a later milestone.
-- **One device per identity, one relay, no groups, no files in chats yet.**
+- **Forward secrecy covers messages in transit, not archives.** A chat's archive on the relay is encrypted with a key every member holds, so someone who later steals one member's unlocked device could read that chat's archive. Private chats are never archived.
+- **One device per identity, and one relay per person.**
+- **No files in Private chats yet.**
+- **Back up your keys folder and its passphrase.** Archives bring chats back after a reinstall (see [chat archives](#the-mailbox-relay)), but only with your keys.
 
 ## Tests
 
@@ -360,12 +368,17 @@ ctest --test-dir build --output-on-failure
 - `relay_store` checks the relay's database with a controlled clock: invites, mailbox limits, send tokens, ordering, expiry, quotas, acknowledgement scoping and persistence (Linux and macOS only).
 - `relay` starts a real relay and checks registration and invites, sign-in (including replayed and mis-bound signatures), deposits, offline delivery, push, restarts, expiry, rate limits and hijack attempts, then runs a scripted hostile relay against the client: wrong key, replayed answers, silence, duplicated and malformed envelopes, and a frame declaring 4 GiB (Linux and macOS only).
 - `e2e` starts a real `pq-server` and runs transfers between three simulated users, two of whom use passphrase-protected keys (Linux and macOS only). It covers wrong recipients, locked keys, unknown senders, tampering, truncation, hostile file names, and server restarts and expiry.
+- `relay_setup` checks the relay's setup safeguards, such as `--create-invite` refusing to make a second relay identity in the wrong storage folder (Linux and macOS only).
+- `group` runs up to 18 users against a real relay: creating groups, introductions, tokens passed on through the creator (which it can't read), per-member delivery, archives and restore, deletion by agreement and attachments, and hostile members and creators (Linux and macOS only; it takes about 12 minutes).
+- `fuzz_smoke` runs the built-in fuzzer (`pq-fuzz`) for 20 seconds against every parser of someone else's data (not on Windows).
+
+The `chat`, `relay` and `relay_protocol` suites also cover forward secrecy, Private chats and the encrypted connection. For deeper checks, `-DPQ_SANITIZE=ON` builds everything with AddressSanitizer and UndefinedBehaviorSanitizer (use few parallel jobs, as it needs a lot of memory), and `-DPQ_FUZZ=ON` with clang builds `pq-libfuzzer` for long coverage-guided fuzzing runs.
 
 The release workflow runs the same tests against the real liboqs before it publishes anything.
 
-## Protocol version
+## Compatibility
 
-This is protocol version 2. It is not compatible with v1: the sender and recipient clients and the server all need to be updated together.
+Every connection to a relay must use the encrypted channel, and the message formats changed with forward secrecy and Private chats. An app or relay from before these changes can't talk to one from after them: **update the relay and every app together**, now and whenever a release says the formats changed. The relay upgrades its database by itself, and so does the app with your history (back up `<storage>/v3` on the relay first). Files-tab transfers use protocol version 2, which is not compatible with version 1.
 
 ## Security
 
