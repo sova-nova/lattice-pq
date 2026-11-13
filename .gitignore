@@ -47,3 +47,9 @@ compile_commands.json
 
 # Local application data (keys, contacts, downloads)
 .pq-file-transfer/
+# Qt / CMake generated output (from in-source builds)
+.qt/
+*_autogen/
+/pq-client
+/pq-server
+/pq-relay-check
