@@ -2,6 +2,8 @@
 
 Lattice (formerly PQ File Transfer) is a cross-platform messenger and file transfer application with post-quantum end-to-end encryption. Messages and files are encrypted on the sender's machine and can only be decrypted by the intended recipients. The relay server in between stores opaque ciphertext and never learns contents, file names, or who sent what.
 
+**Contents:** [Architecture](#architecture) · [Using the app](#using-the-app) · [How it's protected](#how-its-protected) · [Running a relay](#running-a-relay) · [Building](#building) · [Tests](#tests) · [Compatibility](#compatibility) · [Security](#security)
+
 ## Architecture
 
 - **Client** (`pq-client`): a Qt 6 desktop application with three tabs. **Home** gives an overview, **Chats** holds one-to-one chats, groups and disappearing Private chats (with files attached to messages), and **Files** sends and receives a file by link, without any setup. The client generates and protects your keys, manages contacts, and does all the encrypting, signing and checking.
@@ -9,9 +11,144 @@ Lattice (formerly PQ File Transfer) is a cross-platform messenger and file trans
 - **Connections**: every connection to a relay is encrypted with a post-quantum handshake (ML-KEM-768 with X25519), and the relay proves its identity before the app sends anything. Inside that sit length-prefixed binary messages (`[u32 length][u8 type][payload]`).
 - **`pq-relay-check`**: a command-line check that a relay is reachable and genuine.
 
-A Files-tab transfer works like this. The sender uploads and receives a **transfer ID**, then gives that ID to the recipient through any channel. The recipient downloads with the ID, and the server deletes its copy once the recipient confirms the file decrypted and verified correctly. Messaging is described [further down](#messaging-saved-chats).
+A Files-tab transfer works like this. The sender uploads and receives a **transfer ID**, then gives that ID to the recipient through any channel. The recipient downloads with the ID, and the server deletes its copy once the recipient confirms the file decrypted and verified correctly. Messaging is described [further down](#messaging).
 
-## Cryptography
+## Using the app
+
+### Getting it
+
+Download it from the releases page (an AppImage for Linux, a zip for Windows), or [build it yourself](#building). On Linux, building and installing also puts **Lattice** in your app menu.
+
+Messaging needs a relay: someone runs one (see [running a relay](#running-a-relay)) and gives you an invite. Sending a file from the Files tab needs only a relay's address.
+
+### First start
+
+A short guide walks through setting up, one step at a time: a welcome, **your name** (shown on your contact card), **protecting your keys** with a passphrase (recommended; or *Not now*, and do it later in Settings), **connecting for messaging** (paste the relay invite you were given, or *Not now: I'll just send files*), and finally **Add your first contact** or **Go to Home**. Each step is checked before moving on, and **Back** goes to the previous one. If you pasted an invite, messaging is set up as soon as the window opens, with the usual confirmation of the relay's identity. Closing the guide before the end cancels set-up; start the app again to begin again.
+
+Your keys are made on the first start and kept in `~/.pq-file-transfer/keys/` (`%USERPROFILE%\pq-file-transfer\keys\` on Windows), with your history and contacts beside them.
+
+**Back up your `keys` folder, and your passphrase if you set one.** If you lose either, you can't receive anything sent to your old keys, and every contact has to re-add you.
+
+### Finding your way around
+
+**Home.** The app opens on **Home** (tabs: Home, Chats, Files). It shows whether messaging is set up (with **Set up messaging…** if not), a warning with **Protect now…** while your keys aren't protected by a passphrase, a **Waiting for you** line with **Review** when message requests, group invitations or deletion requests need an answer, four big buttons (**Open chats**, with how many messages are unread; **Add contact**; **Send a file**; **Receive a file**, which take you to the right place on the Files tab), and your five most recent chats: click one to open it.
+
+**Chats.** On the left: **Add contact…** and **New** (a group, or a Private chat), a **waiting for you** row when message requests, group invitations or deletion requests need an answer (click it to choose one), and one list of all your chats, most recent first; groups are marked "· group" and Private chats with ⏳. Above the chat, **⋯** holds that chat's options: delivery and read receipts, **Check fingerprint…**, **Start a Private chat…**, **Block from messaging…** and **Delete chat…**.
+
+**Settings.** **Settings…**, at the top right of the window on either tab, holds your fingerprint (to read out when a contact checks it), your contact card (copy it or save it as a file), your key files, key protection (set, change or remove a passphrase), and the messaging extras: relay invites, the cards you've issued, and restoring your history. While your keys aren't protected by a passphrase, Home shows one line saying so, with **Protect now…**.
+
+**The look.** The app always uses its own dark look, the same on every computer, whatever your system's theme: Qt's Fusion style with a dark palette and one style sheet (`client/app_style.cpp`). The main action on each screen is blue; quieter actions look like links. In a chat, each message is a box with who sent it, when and its status on a small line on top: yours tinted blue on the right, theirs grey on the left. You can still select any part of the text, across several messages. Chats are listed as two-line rows: the name, then "Verified", "Not verified", "Group · 3 people" or "Private · 1 day after reading", with the date of the last activity and an unread count. By default, messages sent close together (within 3 minutes, by the same person) share one box with one name and time, with a line for each new day ("Today", "Yesterday", "23 Oct") and the status under the latest; hover a message for its own time and status. **Settings… → Appearance** switches to one box per message, each with its full time and status. The connection status at the top of Home and Chats has a coloured dot: **Online** (green) when messages send and arrive, **Connecting…** (amber), **Offline** (red: messages wait and send when you're back), or a red explanation if something needs your attention; hover it for the technical detail.
+
+**Icons** appear when Qt's SVG module is installed (usually the `qt6-svg` development package); CMake says "Icons: on" or "Icons: off" when it configures, and without them everything works the same.
+
+### Protecting your keys
+
+Your private keys let you read files sent to you. If someone copies them, from a stolen laptop or an unprotected backup, they can read everything ever sent to you. A passphrase encrypts the key files on disk, so a copied file is useless without it.
+
+- **First run:** the app explains this and asks you to choose a passphrase (at least 8 characters; a few random words work well).
+- **Upgrading from an earlier version:** the app offers to protect your existing keys. Your fingerprint doesn't change, so contacts don't need to do anything.
+- **Skipping is allowed.** It's your computer and your choice. **Skip (not recommended)** leaves the keys unprotected, and the app won't keep asking. You can protect them later from **Settings… → Change key protection…**.
+- **Settings… → Change key protection…** lets you set, change or remove the passphrase at any time. The status line above it shows whether your keys are currently protected.
+- **A forgotten passphrase cannot be recovered.** There is no reset: the keys are encrypted with it.
+
+The passphrase is turned into an encryption key with scrypt (128 MiB of memory, so guessing is slow and expensive even for an attacker with a lot of hardware), and the keys are encrypted with AES-256-GCM. Each protected file also authenticates which key it holds, so the two files can't be swapped. While the app is open, the decrypted keys are held in memory, and they are wiped when you close it.
+
+#### Remembering the passphrase (OS keychain)
+
+If the app was built with keychain support, the passphrase prompt has a **Remember on this computer** checkbox (ticked by default). The passphrase is then kept in your operating system's own secret store, so the app unlocks your keys without asking. In normal use you only type the passphrase again after reinstalling, or on a new computer.
+
+| System | Where it is kept |
+|---|---|
+| Windows | Credential Manager |
+| macOS | Keychain (you may see a one-time "allow access" prompt) |
+| Linux | Secret Service: GNOME Keyring, KWallet, or any compatible keyring |
+
+Nothing needs configuring. The one catch is Linux: a keyring service must be running. That is normal on Ubuntu, Fedora and KDE desktops but not on minimal window managers or over SSH. If there isn't one, the app tells you the passphrase couldn't be saved and simply asks for it at each start.
+
+**What this does and doesn't protect against.** The keychain is unlocked by your operating-system login. A copied key file, a stolen disk or an unencrypted backup stays useless, because the passphrase isn't in the file. It does *not* protect against malware running as you, or someone using your logged-in session, which holds for any desktop app. You can remove the saved passphrase at any time from **Settings… → Change key protection… → Forget saved passphrase**.
+
+**Limits.** The passphrase and unlocked keys sit in ordinary process memory while the app runs, so this doesn't defend against someone who can read that memory, or against a swap file or hibernation image on an unencrypted disk. Full-disk encryption covers that.
+
+### Adding a contact
+
+The easiest way is a **contact card**: one line of text that holds a name, your public keys and your relay server, signed with your identity key.
+
+Click **Add contact…** (on the Files tab, beside "Send to", or above the contact list on the Chats tab). One dialog holds both halves of the swap:
+
+1. **Share your card:** **Copy my card**, or **Save as file…**, and send it to your contact any way you like (it holds no secrets).
+2. **Add their card:** paste the card they sent you, optionally give them a name (otherwise the card suggests one), and click **Add contact**. If something is wrong with what was pasted, the dialog stays open so you can fix it.
+3. **Compare the fingerprint shown with your contact over a call or in person** before confirming. A signature proves a card wasn't altered on the way, but not who made it, so this check is what makes it trustworthy.
+4. If the card names a relay server different from theirs, the app asks before switching. It never switches silently.
+
+Do this in both directions: each of you needs the other as a contact, so that you can send to them and recognise files from them.
+
+**Why cards are signed.** Your fingerprint is a hash of your signing key. Before version 0.5, a card carried the encryption key unsigned, so someone who altered a card in transit could keep your signing key (the fingerprint still matched) and substitute their own encryption key, and then read files sent to you. Now the card is a signed *identity bundle* that binds the two keys together, and any change to the encryption key breaks the signature. Fingerprints did not change, so contacts you already verified stay verified.
+
+**Older contacts.** Contacts added from a version 1 card or from key files show **(key not verified)** in the list, and the app asks you to confirm before sending to them. Ask them to update and send a new card. Importing it repairs the contact in place, with no new fingerprint check needed (the signing key is the same), and replaces the saved encryption key if it was different. Newer cards from people you already have are applied the same way, which also covers someone rotating their encryption key. A card with a different signing key is a key change, and the app asks you to verify the new fingerprint again.
+
+The older method still works: **Settings… → Export key files…** saves two `.key` files, and **Add contact…** → **Use key files instead…** adds them. Contacts added that way are marked as not verified. **Remove…** beside "Send to" removes the selected contact.
+
+### Messaging
+
+The **Chats** tab sends messages through a mailbox relay. Messages are end-to-end encrypted and signed, work when the other person is offline (the relay holds them until they connect), and are kept in an encrypted history on your computer.
+
+#### Setting up messaging
+
+**1. Set up messaging (once).** Click **Set up messaging…** and paste the invite string the relay's operator gave you (see [invites](#invites)). The app shows the relay's identity, pins it, and creates your mailbox. Nothing the relay learns can be tied to your name or your identity keys: your mailbox has its own random ID and its own key. The confirmation shows the relay's address and its ID; the text can be highlighted and copied, or use **Copy relay ID**, so you can compare it with what the operator tells you. When setup finishes, the relay for sending files on the Files tab is set to the same relay, so it only has to be chosen once (you can still change it there afterwards).
+
+#### Cards and contacts
+
+**2. Give each person their own card.** Use **Copy my card** / **Save as file…** in the **Add contact…** dialog, or the same in **Settings…**. With messaging set up it asks who the card is for, then makes a card that carries a permission to message you that exists only for that card. Revoke one card and only that card stops working. Under **Settings… → Cards issued…** you can see every card, whether it has been used, and by whom. If a card is first used by one person and later by another, you are warned that it was probably passed on.
+
+**3. Add each other.** Add the card you were given with **Add contact…** as before, including the fingerprint check. Cards from before version 0.7 don't carry a messaging address: ask for a new one. Importing it updates the contact in place. **Add Contact** starts with an empty box: nothing is read from the clipboard for you.
+
+#### Chatting
+
+**4. Chat.** Pick a contact and write. Each message shows its state: waiting to send, sent (the relay has it), delivered (their app stored it), read. Both kinds of receipt can be turned off per chat, and each person controls the receipts they send. A message you write while the relay or the other person is unreachable waits in a queue and goes out by itself.
+
+Any part of the messages can be selected with the mouse or keyboard, within one message or across several, and copied with Ctrl+C (Ctrl+A selects everything); right-click offers Copy, **Copy message** (one whole message, without the delivery marks) and Select all. Double-click an attachment, or a group message you sent, for its details (or right-click, then Details…). When a message arrives while you are on the Files tab, the Chats tab shows how many are waiting, as in "Chats (3)"; they count as read once you are looking at that tab.
+
+**Message requests.** If someone writes to you who isn't a contact (they had a card of yours), it arrives as a **message request**: you see their fingerprint, the name they gave themselves and what they wrote, and nothing else happens until you decide. **Accept** asks you to verify their fingerprint first, then adds them and delivers what they sent. **Decline** deletes it.
+
+**Revoking.** On a chat, **Block from messaging…** (in the chat's **⋯** menu) removes every card and permission that person has been given. They can no longer send you anything until you give them a new card. Their earlier messages stay in your history.
+
+#### Groups
+
+**New → New group…** makes a group of up to 16 people, including you, from contacts you can message. Members who aren't each other's contacts are introduced by you, the creator: each is labelled *Verified by you*, *Contact* or *Introduced by …*, so you can see whose key you checked yourself. A new group shows "setting up" until every member can write to every other; this goes through the creator, who passes on what's needed without being able to read it, so it waits while the creator is offline. Each message shows how many members have it, and double-click shows who. Membership is fixed when the group is made: to change it, make a new group.
+
+#### Private chats (⏳)
+
+Next to your saved chat with someone you can start a Private chat (**New → New Private chat…**), listed apart under *Private chats (disappearing)*. Its messages disappear on a timer chosen when it starts, which can't be changed later: 1 hour, 1 day, 7 days or 30 days, counted from when a message is sent or from when it is read (an unread message goes after 30 days). Once gone, a message can't be brought back from either device or the relay. Each message shows its time left; right-click to take back a message they haven't read yet, or to delete one from your device. The other person always sees when you've read a message, because reading can be what starts the timer. Private chats are never backed up or archived, and are not brought back after a reinstall. Copies, screenshots and anything exported don't disappear, and a modified app could keep messages, so use them with people you trust. Files can't be sent in Private chats yet.
+
+#### Files in a chat
+
+Press **Attach…** next to the message box to send a file to the person or group you are talking to; anything you have typed goes with it as a caption. The file is encrypted on your computer, uploaded to your relay, and each recipient gets their own one-time download token. It reaches them only once the upload has finished, so a relay that is down just means waiting. Nothing is ever downloaded automatically: a recipient sees the file's name and size, double-clicks it, chooses a folder, and the app saves it there under a name that can't replace anything, after checking it against what you signed. The relay deletes its copy when everyone has it, when you withdraw it (double-click the file, then **Withdraw it**), or when the days you chose run out. You see how many have it ("1 of 2 have it"). The limits are the relay's: by default 1 GiB per file, 4 GiB stored per mailbox, kept up to 30 days (`--max-attachment-mib`, `--attachment-quota-mib`, `--attachment-max-days`). A chat restored from its archive shows its attachments but can't fetch them, because the key is never in the archive.
+
+#### Archives and restoring
+
+The app keeps an encrypted, tamper-evident copy of each chat on the relay, so a lost or wiped device doesn't lose its chats. The relay holds only ciphertext and can't read or alter it undetected; it also keeps one encrypted keyring per mailbox, which holds the keys a reinstalled app needs to find and open those archives. To restore after a reinstall, put your keys folder back, enter the same passphrase, set up messaging against the same relay and mailbox, and press **Settings… → Restore history…**. This needs the keys folder and its passphrase: without them there is nothing to restore from, and the relay cannot help. Only chats that had been archived come back (not chats from before archives existed, and never Private chats), restored messages are marked read, and delivery detail for messages you sent is not kept. Each chat's archive is limited by `--archive-quota-mib`, and a mailbox's keyring by `--keyring-max-kib` (each chat adds about 6 KB to it, so the default holds roughly 600 chats).
+
+#### Deleting a chat, or messages in it, for everyone
+
+Any member can ask to delete the whole chat, or particular messages, from the relay and from every device (**Delete chat…** (in the chat's **⋯** menu); others answer under the **waiting for you** row (deletion requests)). It only happens if *every* member agrees: each acceptance is signed with that member's archive key, and the relay checks that all of them signed before it acts. If anyone says no, or doesn't answer within 7 days, nothing is deleted. A deleted message leaves a gap marked "deleted by agreement"; the relay keeps only its hash, so the rest of the chat still checks out. Only what is in the archive can be removed from the relay: messages sent before a chat's archive was made are on devices only. A relay operator can always delete data they hold; what this adds is that members, not the relay, decide.
+
+### Sending and receiving files (Files tab)
+
+The Files tab sends one file to one contact by link, with no messaging set up. Set the relay with **Change** beside "Using relay …" at the bottom (as `host:port`, then **Done**); it's remembered between sessions, and setting up messaging fills it in for you.
+
+#### Send a file
+
+In the **Send a file** card, choose the contact under **Send to**, click **Choose file and send…**, and pick a file. When it's uploaded, a **Ready to share** panel appears: click **Copy link** and send the link to the recipient. It looks like `pqft://10.8.0.1/0123abcd…` and includes the relay server. **Copy transfer ID instead** gives just the 32-character ID if you prefer. Progress and **Cancel** show while a transfer runs.
+
+The link or ID lets anyone download the encrypted file, but only the recipient can decrypt it. Send it over any channel.
+
+#### Receive a file
+
+In the **Receive a file** card, paste the share link (or the bare transfer ID) into the box and click **Download** (or press Enter). If the link names a different relay server than yours, the app asks which one to use. The file is verified, decrypted, and saved to the `downloads` folder (click **Open Downloads folder** to view it). Existing files are never overwritten. A new copy is saved as `name (1).ext`.
+
+## How it's protected
+
+### Cryptography
 
 | Purpose | Algorithm | Standard |
 |---|---|---|
@@ -23,9 +160,15 @@ A Files-tab transfer works like this. The sender uploads and receives a **transf
 | Passphrase stretching | scrypt (128 MiB) | RFC 7914 |
 | Fingerprints | SHA-256 of the ML-DSA public key | FIPS 180-4 |
 
-### How a Files-tab transfer is protected
+### Messages
 
-(Messages and chat files are protected differently, with forward secrecy: see [what protects your messages](#what-protects-your-messages).)
+- Each message is a record signed with the sender's identity key: who sent it, to whom, in which conversation, when, and what they had already sent and received. The recipient checks the signature against the sender's key, and checks the record is for exactly the people in that chat, so a message can't be forged, edited or redirected to someone else.
+- **Forward secrecy.** Each envelope is sealed with three secrets combined: the recipient's long-term ML-KEM key, plus a **one-time prekey** (its own ML-KEM key and an X25519 key) taken from the recipient's relay and signed by the recipient. Once their app has received the message, it securely deletes that prekey's private half, so a recorded envelope can't be opened later even by someone who steals every key the recipient still has. The app keeps about 100 prekeys on the relay and tops them up. If they run out, a weekly-rotated last-resort prekey is used instead. If the relay claims there are none at all, the message is sealed as before and the sender is told.
+- The sender's identity is inside the envelope, so the relay can't see who is writing to whom, and sizes are padded to 4, 16 or 64 KiB.
+- Your history is encrypted on disk, row by row, with a key derived from your identity's private key. It is locked by the same passphrase as your keys and stays readable when you change that passphrase. A copy of `history.db` is useless without your keys.
+- A message whose sender's earlier message never arrived is shown, flagged as following a gap.
+
+### Files-tab transfers
 
 1. The sender encapsulates to the recipient's ML-KEM public key and gets a fresh shared secret for this transfer.
 2. Two AES-256 keys are derived from it, one for file data and one for metadata. The HKDF salt is the SHA-256 hash of the public header (sizes, KEM ciphertext, nonce), so changing any header field breaks decryption.
@@ -33,14 +176,20 @@ A Files-tab transfer works like this. The sender uploads and receives a **transf
 4. Each chunk is encrypted with AES-GCM. Its nonce is derived from the chunk index, and its associated data includes the index and a last-chunk flag, so chunks can't be reordered, duplicated or dropped without detection.
 5. The recipient decapsulates, opens the sealed metadata, and looks up the sender by fingerprint in their contacts. It verifies the signature, then decrypts the chunks into a `.part` file that is renamed only once everything has been authenticated.
 
-### Security properties
-
 - **Confidentiality**: only the holder of the recipient's ML-KEM private key can decrypt.
 - **Authenticity**: files are accepted only from senders in your contact list, verified with ML-DSA-65. Unknown senders are rejected.
 - **Integrity**: any change to the header or chunks, or any truncation, is detected, and no partial output is kept.
 - **Metadata privacy**: the server sees file size, timing and IP addresses, but not file names or sender identity.
 - **Per-transfer keys**: each transfer uses a fresh encapsulation, so the keys of one transfer reveal nothing about another.
-- **No forward secrecy for Files-tab transfers** (chat messages have it): these transfers are encrypted to the recipient's long-term key. Anyone who later obtains a recipient's `private_kem` file, together with a stored ciphertext, can decrypt it. That is why the private keys can be protected by a passphrase (see below).
+- **No forward secrecy for Files-tab transfers** (chat messages have it): these transfers are encrypted to the recipient's long-term key. Anyone who later obtains a recipient's `private_kem` file, together with a stored ciphertext, can decrypt it. That is why the private keys can be protected by a passphrase (see [protecting your keys](#protecting-your-keys)).
+
+### Connections to the relay
+
+Everything between the app and a relay is encrypted, and the relay must prove its identity before anything is sent: invites, send tokens, which mailbox signs in and what is sent can't be read by anyone watching the network (they can still see that you are talking to the relay, and roughly how much). The Files tab trusts the same relay as messaging when it is the same address, and otherwise remembers the relay it first connected to and refuses one whose identity has changed. See [compatibility](#compatibility).
+
+### What the relay sees
+
+Random mailbox IDs, the hash of each send token, and sealed envelopes it cannot read. It never sees names, identity keys, who sent a message, or content. Envelopes are deleted when their owner acknowledges them, or when their lifetime runs out (never more than 30 days).
 
 ### Trust model
 
@@ -48,7 +197,108 @@ Security depends on having your contacts' **real** public keys. Public keys can 
 
 Anyone who has a transfer ID can download the ciphertext, but they can't decrypt it unless they are the recipient. The server also deletes a transfer only after the real recipient has decrypted it, so someone else downloading it doesn't remove it.
 
-## Dependencies
+### Limits
+
+- **Forward secrecy covers messages in transit, not archives.** A chat's archive on the relay is encrypted with a key every member holds, so someone who later steals one member's unlocked device could read that chat's archive. Private chats are never archived.
+- **One device per identity, and one relay per person.**
+- **No files in Private chats yet.**
+- **Back up your keys folder and its passphrase.** Archives bring chats back after a reinstall (see [archives and restoring](#archives-and-restoring)), but only with your keys.
+
+## Running a relay
+
+### Starting it
+
+```bash
+./pq-server [--port 9000] [--bind ADDR] [--storage DIR] [--quota-gb 50]
+```
+
+One server, one port, two services. Every connection first sets up the encrypted channel (see [connections to the relay](#connections-to-the-relay)); the server then tells the two apart by the first message inside it.
+
+- **File transfers (the Files tab, protocol v2).** Transfers are kept in a per-user temporary directory, which you can override with `--storage` or `PQ_STORAGE_DIR`. Each transfer is deleted once its recipient confirms it, or 24 hours after it was uploaded. Complete transfers survive a restart, and their 24 hours keep counting while the server is down.
+- **Messaging (protocol v3): mailboxes, archives, prekeys and attachments.** Sealed envelopes are held until their owner collects them. State lives in `<storage>/v3`, which holds the database and **the relay's signing key**. Back that folder up (see below).
+
+`--bind ADDR` limits the server to one IPv4 address. If you reach it over WireGuard, bind it to the tunnel address (for example `--bind 10.8.0.1`) so that it never listens on your LAN or the internet, even if a firewall rule is wrong. The default, `0.0.0.0`, listens on every interface.
+
+To reach the server over the internet, forward its port, or run it on a small VPS. Every connection is encrypted and the relay proves its identity first, so a VPN is no longer needed for privacy. An observer can still see that you are talking to the relay, and roughly how much and when. WireGuard remains a good extra layer if you'd rather not expose the port at all.
+
+### Its identity
+
+On first start the relay generates a signing key and prints its **Relay ID**, the SHA-256 of the public key. Clients pin that ID, and the relay proves it holds the matching key every time a client connects, so a fake relay, a hijacked address or a replayed answer is detected even outside WireGuard. That is why the key matters: if you rebuild the machine without `<storage>/v3/relay_private.key`, every client sees "relay changed" and refuses to talk to the new one. The private key is stored with owner-only permissions and is not passphrase-protected, because the relay has to start unattended.
+
+### Invites
+
+Nobody can create a mailbox without an invite, so strangers can't fill your disk. Make one on the relay machine. Use **the same `--storage` folder, as the same user,** that the running relay uses: that folder holds the relay's identity, and an invite carries that identity. Always give the server and `--create-invite` the same absolute `--storage` (the default is a temporary folder, which is a poor place for a signing key):
+
+```bash
+./pq-server --storage /var/lib/pq-relay --create-invite --public-address 10.8.0.1:9000
+```
+
+It prints a one-time code and a ready-to-paste invite string, `pqft-relay://10.8.0.1:9000/<relay id>/<code>`. That single string carries where the relay is, which key to trust, and the code, so the first connection is already verified. An invite works once and expires after 14 days.
+
+It also prints `Relay state:`, the folder it used, and the Relay ID, which must equal the one the running relay printed at startup. If the storage has no relay identity yet, `--create-invite` refuses instead of silently creating a second identity (a different `--storage` is the usual cause; clients would report "does not match the one you pinned"). Add `--allow-new-identity` only for a brand-new relay that has never been started.
+
+**Members vouching for friends.** You don't have to make every invite yourself. Anyone with a mailbox on your relay can press **Settings… → Relay invites…** in the app to make a one-time invite for a friend. The same dialog shows which of your invites are still unused (and when they expire), when people joined through you, and lets you cancel an unused invite if it went to the wrong place. The relay records who vouched for each person, so there is always someone accountable, and a stranger who merely knows your relay's address can't get an invite. By default one member may have 3 unused invites at once and may invite 10 people in all (`--member-invites` and `--member-invites-total`; `--member-invites 0` turns this off, leaving only your own). An invite is a secret: it crosses the network only inside the encrypted connection, but send it to your friend over a channel you trust.
+
+### Managing mailboxes
+
+To see who is on the relay and who vouched for whom, or to undo it:
+
+```bash
+./pq-server --storage /var/lib/pq-relay --list-mailboxes
+./pq-server --storage /var/lib/pq-relay --remove-mailbox a1b2c3d4e5f6            # just that mailbox
+./pq-server --storage /var/lib/pq-relay --remove-mailbox a1b2c3d4e5f6 --with-invitees   # and everyone it invited
+```
+
+The first columns of `--list-mailboxes` are the IDs to use (at least 8 characters). Removing a mailbox deletes its queued messages and its owner can no longer sign in. A relay with existing mailboxes upgrades its database automatically the first time the new version starts.
+
+### Checking it from the outside
+
+`pq-relay-check` confirms a relay is reachable and genuine from wherever you run it, through the tunnel and the firewall:
+
+```bash
+pq-relay-check 10.8.0.1:9000                 # reachable? prints the Relay ID to compare
+pq-relay-check 10.8.0.1:9000 <relay id>      # ...and checks it matches the one you were given
+pq-relay-check 'pqft-relay://...'            # full round trip using one invite (it is used up)
+```
+
+### Settings
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--port N` | 9000 | Port to listen on |
+| `--bind ADDR` | 0.0.0.0 | IPv4 address to listen on |
+| `--storage DIR` | a per-user temporary folder | Where everything is kept; use one absolute folder |
+| `--quota-gb N` | 50 | Space for Files-tab transfers |
+| `--create-invite` | | Make a one-time invite, then exit (with `--public-address HOST:PORT`) |
+| `--mailbox-quota-kib N` | 65536 | Queued bytes allowed per mailbox |
+| `--rate-limit N` | 120 | Deposits per minute, per send token and per client address |
+| `--sweep-seconds N` | 60 | How often expired envelopes are removed |
+| `--allow-new-identity` | off | With `--create-invite`: create the relay's identity if the storage has none |
+| `--max-archives N` | 1000 | Chat archives the relay will hold |
+| `--archive-quota-mib N` | 512 | Encrypted bytes allowed per chat archive |
+| `--keyring-max-kib N` | 4096 | Largest keyring one mailbox may store (each chat adds about 6 KB) |
+| `--max-prekeys N` | 200 | One-time prekeys one mailbox may keep (for forward secrecy) |
+| `--prekey-takes-per-hour N` | 60 | Prekeys one contact (send token) may take in an hour |
+| `--max-attachment-mib N` | 1024 | Largest single chat attachment |
+| `--attachment-quota-mib N` | 4096 | All of one mailbox's stored attachments together |
+| `--attachment-max-days N` | 30 | How long an attachment may be kept |
+| `--member-invites N` | 3 | Unused invites one member may have at once; 0 turns member invites off |
+| `--member-invites-total N` | 10 | Most people one member may ever invite |
+| `--list-mailboxes` | | Show every mailbox, who vouched for it and what is queued, then exit |
+| `--remove-mailbox ID` | | Remove a mailbox (ID prefix of 8+ characters), then exit |
+| `--with-invitees` | | With `--remove-mailbox`: also everyone it invited, and theirs |
+
+A systemd unit for the relay (the `ExecStart` line is the important part):
+
+```ini
+[Service]
+User=pqrelay
+StateDirectory=pq-relay
+ExecStart=/usr/local/bin/pq-server --port 9000 --bind 10.8.0.1 --storage /var/lib/pq-relay --quota-gb 20
+Restart=on-failure
+```
+
+## Building
 
 | Library | Purpose | Version |
 |---|---|---|
@@ -60,8 +310,6 @@ Anyone who has a transfer ID can download the ciphertext, but they can't decrypt
 | Qt SVG | Icons in the app (client only, optional) | same as Qt |
 | CMake | Build system | 3.16+ |
 | C++17 compiler | GCC 9+, Clang 10+, MSVC 2019+ | |
-
-## Build
 
 ### Ubuntu/Debian
 
@@ -101,7 +349,9 @@ cmake ..            # macOS: cmake -DCMAKE_PREFIX_PATH=$(brew --prefix qt) ..
 cmake --build . -j
 ```
 
-**Linux: putting it in the app menu.** Install it for your user, with no `sudo`:
+#### Putting it in the app menu (Linux)
+
+Install it for your user, with no `sudo`:
 
 ```bash
 cmake -B build -DCMAKE_INSTALL_PREFIX=$HOME/.local
@@ -110,9 +360,13 @@ cmake --build build -j && cmake --install build
 
 That puts `pq-client`, `pq-server` and `pq-relay-check` in `~/.local/bin`, and adds **Lattice** to the app menu with its icon (`~/.local/share/applications`, `~/.local/share/icons`), ready to pin to a taskbar or dock. Run the same two commands again after pulling changes. To remove it, delete the files that `build/install_manifest.txt` lists.
 
+#### Relay only
+
 To build only the relay server and the command-line tools, for example on a headless machine without Qt, use `cmake -DPQ_BUILD_CLIENT=OFF ..`. They still need liboqs and SQLite. On a small machine, build just the relay with `cmake --build . --target pq-server`: the default build also compiles the client core (for `pq-relay-check`), and its largest file, `messaging_engine.cpp`, can take a long time or a lot of memory on a small or single-core box (about 10 seconds and 320 MB on a desktop). You don't have to compile them on the relay machine at all: the release page has a ready-made `pq-server-linux-x86_64` (it needs the system's `libssl3` and `libsqlite3-0`, both present on current Debian and Ubuntu).
 
-**Optional: OS keychain support.** If QtKeychain for Qt 6 is installed, CMake finds it and the client can remember your key passphrase. Without it the client still works and just asks for the passphrase at every start. To build it yourself:
+#### OS keychain support (optional)
+
+If QtKeychain for Qt 6 is installed, CMake finds it and the client can remember your key passphrase. Without it the client still works and just asks for the passphrase at every start. To build it yourself:
 
 ```bash
 sudo apt install libsecret-1-dev      # Linux only
@@ -144,209 +398,6 @@ Add `-DPQ_REQUIRE_KEYCHAIN=ON` when configuring the client to make the build fai
    ```
 
 The Windows build has not been tested yet.
-
-## Usage
-
-### 1. Run the relay server
-
-```bash
-./pq-server [--port 9000] [--bind ADDR] [--storage DIR] [--quota-gb 50]
-```
-
-One server, one port, two services. Every connection first sets up the encrypted channel (see **Encrypted connections** under [the mailbox relay](#the-mailbox-relay)); the server then tells the two apart by the first message inside it.
-
-- **File transfers (the Files tab, protocol v2).** Transfers are kept in a per-user temporary directory, which you can override with `--storage` or `PQ_STORAGE_DIR`. Each transfer is deleted once its recipient confirms it, or 24 hours after it was uploaded. Complete transfers survive a restart, and their 24 hours keep counting while the server is down.
-- **Messaging (protocol v3): mailboxes, archives, prekeys and attachments.** Sealed envelopes are held until their owner collects them. State lives in `<storage>/v3`, which holds the database and **the relay's signing key**. Back that folder up (see below).
-
-`--bind ADDR` limits the server to one IPv4 address. If you reach it over WireGuard, bind it to the tunnel address (for example `--bind 10.8.0.1`) so that it never listens on your LAN or the internet, even if a firewall rule is wrong. The default, `0.0.0.0`, listens on every interface.
-
-To reach the server over the internet, forward its port, or run it on a small VPS. Every connection is encrypted and the relay proves its identity first, so a VPN is no longer needed for privacy. An observer can still see that you are talking to the relay, and roughly how much and when. WireGuard remains a good extra layer if you'd rather not expose the port at all.
-
-#### The mailbox relay
-
-**Identity.** On first start the relay generates a signing key and prints its **Relay ID**, the SHA-256 of the public key. Clients pin that ID, and the relay proves it holds the matching key every time a client connects, so a fake relay, a hijacked address or a replayed answer is detected even outside WireGuard. That is why the key matters: if you rebuild the machine without `<storage>/v3/relay_private.key`, every client sees "relay changed" and refuses to talk to the new one. The private key is stored with owner-only permissions and is not passphrase-protected, because the relay has to start unattended.
-
-**Invites.** Nobody can create a mailbox without an invite, so strangers can't fill your disk. Make one on the relay machine. Use **the same `--storage` folder, as the same user,** that the running relay uses: that folder holds the relay's identity, and an invite carries that identity. Always give the server and `--create-invite` the same absolute `--storage` (the default is a temporary folder, which is a poor place for a signing key):
-
-```bash
-./pq-server --storage /var/lib/pq-relay --create-invite --public-address 10.8.0.1:9000
-```
-
-It prints a one-time code and a ready-to-paste invite string, `pqft-relay://10.8.0.1:9000/<relay id>/<code>`. That single string carries where the relay is, which key to trust, and the code, so the first connection is already verified. An invite works once and expires after 14 days.
-
-It also prints `Relay state:`, the folder it used, and the Relay ID, which must equal the one the running relay printed at startup. If the storage has no relay identity yet, `--create-invite` refuses instead of silently creating a second identity (a different `--storage` is the usual cause; clients would report "does not match the one you pinned"). Add `--allow-new-identity` only for a brand-new relay that has never been started.
-
-**Members vouching for friends.** You don't have to make every invite yourself. Anyone with a mailbox on your relay can press **Settings… → Relay invites…** in the app to make a one-time invite for a friend. The same dialog shows which of your invites are still unused (and when they expire), when people joined through you, and lets you cancel an unused invite if it went to the wrong place. The relay records who vouched for each person, so there is always someone accountable, and a stranger who merely knows your relay's address can't get an invite. By default one member may have 3 unused invites at once and may invite 10 people in all (`--member-invites` and `--member-invites-total`; `--member-invites 0` turns this off, leaving only your own). An invite is a secret: it crosses the network only inside the encrypted connection, but send it to your friend over a channel you trust.
-
-To see who is on the relay and who vouched for whom, or to undo it:
-
-```bash
-./pq-server --storage /var/lib/pq-relay --list-mailboxes
-./pq-server --storage /var/lib/pq-relay --remove-mailbox a1b2c3d4e5f6            # just that mailbox
-./pq-server --storage /var/lib/pq-relay --remove-mailbox a1b2c3d4e5f6 --with-invitees   # and everyone it invited
-```
-
-The first columns of `--list-mailboxes` are the IDs to use (at least 8 characters). Removing a mailbox deletes its queued messages and its owner can no longer sign in. A relay with existing mailboxes upgrades its database automatically the first time the new version starts.
-
-**Chat archives and restoring.** The app keeps an encrypted, tamper-evident copy of each chat on the relay, so a lost or wiped device doesn't lose its chats. The relay holds only ciphertext and can't read or alter it undetected; it also keeps one encrypted keyring per mailbox, which holds the keys a reinstalled app needs to find and open those archives. To restore after a reinstall, put your keys folder back, enter the same passphrase, set up messaging against the same relay and mailbox, and press **Settings… → Restore history…**. This needs the keys folder and its passphrase: without them there is nothing to restore from, and the relay cannot help. Only chats that had been archived come back (not chats from before archives existed, and never Private chats), restored messages are marked read, and delivery detail for messages you sent is not kept. Each chat's archive is limited by `--archive-quota-mib`, and a mailbox's keyring by `--keyring-max-kib` (each chat adds about 6 KB to it, so the default holds roughly 600 chats).
-
-**Deleting a chat, or messages in it, for everyone.** Any member can ask to delete the whole chat, or particular messages, from the relay and from every device (**Delete chat…** (in the chat's **⋯** menu); others answer under the **waiting for you** row (deletion requests)). It only happens if *every* member agrees: each acceptance is signed with that member's archive key, and the relay checks that all of them signed before it acts. If anyone says no, or doesn't answer within 7 days, nothing is deleted. A deleted message leaves a gap marked "deleted by agreement"; the relay keeps only its hash, so the rest of the chat still checks out. Only what is in the archive can be removed from the relay: messages sent before a chat's archive was made are on devices only. A relay operator can always delete data they hold; what this adds is that members, not the relay, decide.
-
-**The look.** The app always uses its own dark look, the same on every computer, whatever your system's theme: Qt's Fusion style with a dark palette and one style sheet (`client/app_style.cpp`). The main action on each screen is blue; quieter actions look like links. In a chat, each message is a box with who sent it, when and its status on a small line on top: yours tinted blue on the right, theirs grey on the left. You can still select any part of the text, across several messages. Chats are listed as two-line rows: the name, then "Verified", "Not verified", "Group · 3 people" or "Private · 1 day after reading", with the date of the last activity and an unread count. By default, messages sent close together (within 3 minutes, by the same person) share one box with one name and time, with a line for each new day ("Today", "Yesterday", "23 Oct") and the status under the latest; hover a message for its own time and status. **Settings… → Appearance** switches to one box per message, each with its full time and status. The connection status at the top of Home and Chats has a coloured dot: **Online** (green) when messages send and arrive, **Connecting…** (amber), **Offline** (red: messages wait and send when you're back), or a red explanation if something needs your attention; hover it for the technical detail. **Icons** appear when Qt's SVG module is installed (usually the `qt6-svg` development package); CMake says "Icons: on" or "Icons: off" when it configures, and without them everything works the same.
-
-**First start.** A short guide walks through setting up, one step at a time: a welcome, **your name** (shown on your contact card), **protecting your keys** with a passphrase (recommended; or *Not now*, and do it later in Settings), **connecting for messaging** (paste the relay invite you were given, or *Not now: I'll just send files*), and finally **Add your first contact** or **Go to Home**. Each step is checked before moving on, and **Back** goes to the previous one. If you pasted an invite, messaging is set up as soon as the window opens, with the usual confirmation of the relay's identity. Closing the guide before the end cancels set-up; start the app again to begin again.
-
-**Home.** The app opens on **Home** (tabs: Home, Chats, Files). It shows whether messaging is set up (with **Set up messaging…** if not), a warning with **Protect now…** while your keys aren't protected by a passphrase, a **Waiting for you** line with **Review** when message requests, group invitations or deletion requests need an answer, four big buttons (**Open chats**, with how many messages are unread; **Add contact**; **Send a file**; **Receive a file**, which take you to the right place on the Files tab), and your five most recent chats: click one to open it.
-
-**Settings.** **Settings…**, at the top right of the window on either tab, holds your fingerprint (to read out when a contact checks it), your contact card (copy it or save it as a file), your key files, key protection (set, change or remove a passphrase), and the messaging extras: relay invites, the cards you've issued, and restoring your history. While your keys aren't protected by a passphrase, Home shows one line saying so, with **Protect now…**.
-
-**Finding your way around Chats.** On the left: **Add contact…** and **New** (a group, or a Private chat), a **waiting for you** row when message requests, group invitations or deletion requests need an answer (click it to choose one), and one list of all your chats, most recent first; groups are marked "· group" and Private chats with ⏳. Above the chat, **⋯** holds that chat's options: delivery and read receipts, **Check fingerprint…**, **Start a Private chat…**, **Block from messaging…** and **Delete chat…**. **Settings…**, at the top right of the window, holds relay invites, the cards you've issued, and restoring your history, along with your fingerprint, your contact card and key protection.
-
-**Setting up messaging.** Paste the invite the relay's operator gave you. The confirmation shows the relay's address and its ID; the text can be highlighted and copied, or use **Copy relay ID**, so you can compare it with what the operator tells you. When setup finishes, the relay for sending files on the Files tab is set to the same relay, so it only has to be chosen once (you can still change it there afterwards). **Add Contact** starts with an empty box: nothing is read from the clipboard for you. Any part of the messages can be selected with the mouse or keyboard, within one message or across several, and copied with Ctrl+C (Ctrl+A selects everything); right-click offers Copy, **Copy message** (one whole message, without the delivery marks) and Select all. Double-click an attachment, or a group message you sent, for its details (or right-click, then Details…). When a message arrives while you are on the Files tab, the Chats tab shows how many are waiting, as in \"Chats (3)\"; they count as read once you are looking at that tab.
-
-**Private chats (⏳).** Next to your saved chat with someone you can start a Private chat (**New → New Private chat…**), listed apart under *Private chats (disappearing)*. Its messages disappear on a timer chosen when it starts, which can't be changed later: 1 hour, 1 day, 7 days or 30 days, counted from when a message is sent or from when it is read (an unread message goes after 30 days). Once gone, a message can't be brought back from either device or the relay. Each message shows its time left; right-click to take back a message they haven't read yet, or to delete one from your device. The other person always sees when you've read a message, because reading can be what starts the timer. Private chats are never backed up or archived, and are not brought back after a reinstall. Copies, screenshots and anything exported don't disappear, and a modified app could keep messages, so use them with people you trust. Files can't be sent in Private chats yet.
-
-**Sending files in a chat.** Press **Attach…** next to the message box to send a file to the person or group you are talking to; anything you have typed goes with it as a caption. The file is encrypted on your computer, uploaded to your relay, and each recipient gets their own one-time download token. It reaches them only once the upload has finished, so a relay that is down just means waiting. Nothing is ever downloaded automatically: a recipient sees the file's name and size, double-clicks it, chooses a folder, and the app saves it there under a name that can't replace anything, after checking it against what you signed. The relay deletes its copy when everyone has it, when you withdraw it (double-click the file, then **Withdraw it**), or when the days you chose run out. You see how many have it ("1 of 2 have it"). The limits are the relay's: by default 1 GiB per file, 4 GiB stored per mailbox, kept up to 30 days (`--max-attachment-mib`, `--attachment-quota-mib`, `--attachment-max-days`). A chat restored from its archive shows its attachments but can't fetch them, because the key is never in the archive.
-
-**Encrypted connections.** Everything between the app and a relay is encrypted, and the relay must prove its identity before anything is sent: invites, send tokens, which mailbox signs in and what is sent can't be read by anyone watching the network (they can still see that you are talking to the relay, and roughly how much). A relay no longer needs to sit behind a VPN for this. The Files tab trusts the same relay as messaging when it is the same address, and otherwise remembers the relay it first connected to and refuses one whose identity has changed. An app or relay from before this version can't connect to one from after it: update them together.
-
-**Checking it from the outside.** `pq-relay-check` confirms a relay is reachable and genuine from wherever you run it, through the tunnel and the firewall:
-
-```bash
-pq-relay-check 10.8.0.1:9000                 # reachable? prints the Relay ID to compare
-pq-relay-check 10.8.0.1:9000 <relay id>      # ...and checks it matches the one you were given
-pq-relay-check 'pqft-relay://...'            # full round trip using one invite (it is used up)
-```
-
-**What the relay sees and stores.** Random mailbox IDs, the hash of each send token, and sealed envelopes it cannot read. It never sees names, identity keys, who sent a message, or content. Envelopes are deleted when their owner acknowledges them, or when their lifetime runs out (never more than 30 days).
-
-**Limits and settings.**
-
-| Flag | Default | Meaning |
-|---|---|---|
-| `--mailbox-quota-kib N` | 65536 | Queued bytes allowed per mailbox |
-| `--rate-limit N` | 120 | Deposits per minute, per send token and per client address |
-| `--sweep-seconds N` | 60 | How often expired envelopes are removed |
-| `--allow-new-identity` | off | With `--create-invite`: create the relay's identity if the storage has none |
-| `--max-archives N` | 1000 | Chat archives the relay will hold |
-| `--archive-quota-mib N` | 512 | Encrypted bytes allowed per chat archive |
-| `--keyring-max-kib N` | 4096 | Largest keyring one mailbox may store (see below) |
-| `--max-prekeys N` | 200 | One-time prekeys one mailbox may keep (for forward secrecy) |
-| `--prekey-takes-per-hour N` | 60 | Prekeys one contact (send token) may take in an hour |
-| `--max-attachment-mib N` | 1024 | Largest single chat attachment |
-| `--attachment-quota-mib N` | 4096 | All of one mailbox's stored attachments together |
-| `--attachment-max-days N` | 30 | How long an attachment may be kept |
-| `--member-invites N` | 3 | Unused invites one member may have at once; 0 turns member invites off |
-| `--member-invites-total N` | 10 | Most people one member may ever invite |
-| `--list-mailboxes` | | Show every mailbox, who vouched for it and what is queued, then exit |
-| `--remove-mailbox ID` | | Remove a mailbox (ID prefix of 8+ characters), then exit |
-| `--with-invitees` | | With `--remove-mailbox`: also everyone it invited, and theirs |
-
-A systemd unit for the relay (the `ExecStart` line is the important part):
-
-```ini
-[Service]
-User=pqrelay
-StateDirectory=pq-relay
-ExecStart=/usr/local/bin/pq-server --port 9000 --bind 10.8.0.1 --storage /var/lib/pq-relay --quota-gb 20
-Restart=on-failure
-```
-
-### 2. Start the client and set the server
-
-Run `./pq-client` (or **Lattice** from the app menu, once installed). On first run it generates your keypairs in `~/.pq-file-transfer/keys/` (`%USERPROFILE%\pq-file-transfer\keys\` on Windows), and the first-start guide walks you through your name, a passphrase (see below) and connecting for messaging. On the Files tab, set the relay server with **Change** beside "Using relay …" at the bottom (as `host:port`, then **Done**); it's remembered between sessions.
-
-**Back up your `keys` folder, and your passphrase if you set one.** If you lose either, you can't receive anything sent to your old keys, and every contact has to re-add you.
-
-### Protecting your keys with a passphrase
-
-Your private keys let you read files sent to you. If someone copies them, from a stolen laptop or an unprotected backup, they can read everything ever sent to you. A passphrase encrypts the key files on disk, so a copied file is useless without it.
-
-- **First run:** the app explains this and asks you to choose a passphrase (at least 8 characters; a few random words work well).
-- **Upgrading from an earlier version:** the app offers to protect your existing keys. Your fingerprint doesn't change, so contacts don't need to do anything.
-- **Skipping is allowed.** It's your computer and your choice. **Skip (not recommended)** leaves the keys unprotected, and the app won't keep asking. You can protect them later from **Settings… → Change key protection…**.
-- **Settings… → Change key protection…** lets you set, change or remove the passphrase at any time. The status line above it shows whether your keys are currently protected.
-- **A forgotten passphrase cannot be recovered.** There is no reset: the keys are encrypted with it.
-
-The passphrase is turned into an encryption key with scrypt (128 MiB of memory, so guessing is slow and expensive even for an attacker with a lot of hardware), and the keys are encrypted with AES-256-GCM. Each protected file also authenticates which key it holds, so the two files can't be swapped. While the app is open, the decrypted keys are held in memory, and they are wiped when you close it.
-
-### Remembering the passphrase (OS keychain)
-
-If the app was built with keychain support, the passphrase prompt has a **Remember on this computer** checkbox (ticked by default). The passphrase is then kept in your operating system's own secret store, so the app unlocks your keys without asking. In normal use you only type the passphrase again after reinstalling, or on a new computer.
-
-| System | Where it is kept |
-|---|---|
-| Windows | Credential Manager |
-| macOS | Keychain (you may see a one-time "allow access" prompt) |
-| Linux | Secret Service: GNOME Keyring, KWallet, or any compatible keyring |
-
-Nothing needs configuring. The one catch is Linux: a keyring service must be running. That is normal on Ubuntu, Fedora and KDE desktops but not on minimal window managers or over SSH. If there isn't one, the app tells you the passphrase couldn't be saved and simply asks for it at each start.
-
-**What this does and doesn't protect against.** The keychain is unlocked by your operating-system login. A copied key file, a stolen disk or an unencrypted backup stays useless, because the passphrase isn't in the file. It does *not* protect against malware running as you, or someone using your logged-in session, which holds for any desktop app. You can remove the saved passphrase at any time from **Settings… → Change key protection… → Forget saved passphrase**.
-
-**Limits.** The passphrase and unlocked keys sit in ordinary process memory while the app runs, so this doesn't defend against someone who can read that memory, or against a swap file or hibernation image on an unencrypted disk. Full-disk encryption covers that.
-
-### 3. Add a contact
-
-The easiest way is a **contact card**: one line of text that holds a name, your public keys and your relay server, signed with your identity key.
-
-Click **Add contact…** (on the Files tab, beside "Send to", or above the contact list on the Chats tab). One dialog holds both halves of the swap:
-
-1. **Share your card:** **Copy my card**, or **Save as file…**, and send it to your contact any way you like (it holds no secrets).
-2. **Add their card:** paste the card they sent you, optionally give them a name (otherwise the card suggests one), and click **Add contact**. If something is wrong with what was pasted, the dialog stays open so you can fix it.
-3. **Compare the fingerprint shown with your contact over a call or in person** before confirming. A signature proves a card wasn't altered on the way, but not who made it, so this check is what makes it trustworthy.
-4. If the card names a relay server different from theirs, the app asks before switching. It never switches silently.
-
-Do this in both directions: each of you needs the other as a contact, so that you can send to them and recognise files from them.
-
-**Why cards are signed.** Your fingerprint is a hash of your signing key. Before version 0.5, a card carried the encryption key unsigned, so someone who altered a card in transit could keep your signing key (the fingerprint still matched) and substitute their own encryption key, and then read files sent to you. Now the card is a signed *identity bundle* that binds the two keys together, and any change to the encryption key breaks the signature. Fingerprints did not change, so contacts you already verified stay verified.
-
-**Older contacts.** Contacts added from a version 1 card or from key files show **(key not verified)** in the list, and the app asks you to confirm before sending to them. Ask them to update and send a new card. Importing it repairs the contact in place, with no new fingerprint check needed (the signing key is the same), and replaces the saved encryption key if it was different. Newer cards from people you already have are applied the same way, which also covers someone rotating their encryption key. A card with a different signing key is a key change, and the app asks you to verify the new fingerprint again.
-
-The older method still works: **Settings… → Export key files…** saves two `.key` files, and **Add contact…** → **Use key files instead…** adds them. Contacts added that way are marked as not verified. **Remove…** beside "Send to" removes the selected contact.
-
-### 4. Send a file
-
-In the **Send a file** card, choose the contact under **Send to**, click **Choose file and send…**, and pick a file. When it's uploaded, a **Ready to share** panel appears: click **Copy link** and send the link to the recipient. It looks like `pqft://10.8.0.1/0123abcd…` and includes the relay server. **Copy transfer ID instead** gives just the 32-character ID if you prefer. Progress and **Cancel** show while a transfer runs.
-
-The link or ID lets anyone download the encrypted file, but only the recipient can decrypt it. Send it over any channel.
-
-### 5. Receive a file
-
-In the **Receive a file** card, paste the share link (or the bare transfer ID) into the box and click **Download** (or press Enter). If the link names a different relay server than yours, the app asks which one to use. The file is verified, decrypted, and saved to the `downloads` folder (click **Open Downloads folder** to view it). Existing files are never overwritten. A new copy is saved as `name (1).ext`.
-
-### Messaging: Saved chats
-
-The **Chats** tab sends messages through a mailbox relay. Messages are end-to-end encrypted and signed, work when the other person is offline (the relay holds them until they connect), and are kept in an encrypted history on your computer.
-
-**1. Set up messaging (once).** Click **Set up messaging…** and paste the invite string the relay's operator gave you (see [the mailbox relay](#the-mailbox-relay)). The app shows the relay's identity, pins it, and creates your mailbox. Nothing the relay learns can be tied to your name or your identity keys: your mailbox has its own random ID and its own key.
-
-**2. Give each person their own card.** Use **Copy my card** / **Save as file…** in the **Add contact…** dialog, or the same in **Settings…**. With messaging set up it asks who the card is for, then makes a card that carries a permission to message you that exists only for that card. Revoke one card and only that card stops working. Under **Settings… → Cards issued…** you can see every card, whether it has been used, and by whom. If a card is first used by one person and later by another, you are warned that it was probably passed on.
-
-**3. Add each other.** Add the card you were given with **Add contact…** as before, including the fingerprint check. Cards from before version 0.7 don't carry a messaging address: ask for a new one. Importing it updates the contact in place.
-
-**4. Chat.** Pick a contact and write. Each message shows its state: waiting to send, sent (the relay has it), delivered (their app stored it), read. Both kinds of receipt can be turned off per chat, and each person controls the receipts they send. A message you write while the relay or the other person is unreachable waits in a queue and goes out by itself.
-
-**Message requests.** If someone writes to you who isn't a contact (they had a card of yours), it arrives as a **message request**: you see their fingerprint, the name they gave themselves and what they wrote, and nothing else happens until you decide. **Accept** asks you to verify their fingerprint first, then adds them and delivers what they sent. **Decline** deletes it.
-
-**Revoking.** On a chat, **Block from messaging…** (in the chat's **⋯** menu) removes every card and permission that person has been given. They can no longer send you anything until you give them a new card. Their earlier messages stay in your history.
-
-**Groups.** **New → New group…** makes a group of up to 16 people, including you, from contacts you can message. Members who aren't each other's contacts are introduced by you, the creator: each is labelled *Verified by you*, *Contact* or *Introduced by …*, so you can see whose key you checked yourself. A new group shows "setting up" until every member can write to every other; this goes through the creator, who passes on what's needed without being able to read it, so it waits while the creator is offline. Each message shows how many members have it, and double-click shows who. Membership is fixed when the group is made: to change it, make a new group.
-
-#### What protects your messages
-
-- Each message is a record signed with the sender's identity key: who sent it, to whom, in which conversation, when, and what they had already sent and received. The recipient checks the signature against the sender's key, and checks the record is for exactly the people in that chat, so a message can't be forged, edited or redirected to someone else.
-- **Forward secrecy.** Each envelope is sealed with three secrets combined: the recipient's long-term ML-KEM key, plus a **one-time prekey** (its own ML-KEM key and an X25519 key) taken from the recipient's relay and signed by the recipient. Once their app has received the message, it securely deletes that prekey's private half, so a recorded envelope can't be opened later even by someone who steals every key the recipient still has. The app keeps about 100 prekeys on the relay and tops them up. If they run out, a weekly-rotated last-resort prekey is used instead. If the relay claims there are none at all, the message is sealed as before and the sender is told.
-- The sender's identity is inside the envelope, so the relay can't see who is writing to whom, and sizes are padded to 4, 16 or 64 KiB.
-- Your history is encrypted on disk, row by row, with a key derived from your identity's private key. It is locked by the same passphrase as your keys and stays readable when you change that passphrase. A copy of `history.db` is useless without your keys.
-- A message whose sender's earlier message never arrived is shown, flagged as following a gap.
-
-#### Limits
-
-- **Forward secrecy covers messages in transit, not archives.** A chat's archive on the relay is encrypted with a key every member holds, so someone who later steals one member's unlocked device could read that chat's archive. Private chats are never archived.
-- **One device per identity, and one relay per person.**
-- **No files in Private chats yet.**
-- **Back up your keys folder and its passphrase.** Archives bring chats back after a reinstall (see [chat archives](#the-mailbox-relay)), but only with your keys.
 
 ## Tests
 
