@@ -1,6 +1,6 @@
-# PQ File Transfer
+# Lattice
 
-A cross-platform file transfer application with post-quantum end-to-end encryption. Files are encrypted on the sender's machine and can only be decrypted by the intended recipient. The relay server in between stores opaque ciphertext and never learns file contents, file names, or who sent a file.
+Lattice (formerly PQ File Transfer) is a cross-platform messenger and file transfer application with post-quantum end-to-end encryption. Messages and files are encrypted on the sender's machine and can only be decrypted by the intended recipients. The relay server in between stores opaque ciphertext and never learns contents, file names, or who sent what.
 
 ## Architecture
 
@@ -94,6 +94,15 @@ cd pq-file-transfer && mkdir build && cd build
 cmake ..            # macOS: cmake -DCMAKE_PREFIX_PATH=$(brew --prefix qt) ..
 cmake --build . -j
 ```
+
+**Linux: putting it in the app menu.** Install it for your user, with no `sudo`:
+
+```bash
+cmake -B build -DCMAKE_INSTALL_PREFIX=$HOME/.local
+cmake --build build -j && cmake --install build
+```
+
+That puts `pq-client`, `pq-server` and `pq-relay-check` in `~/.local/bin`, and adds **Lattice** to the app menu with its icon (`~/.local/share/applications`, `~/.local/share/icons`), ready to pin to a taskbar or dock. Run the same two commands again after pulling changes. To remove it, delete the files that `build/install_manifest.txt` lists.
 
 To build only the relay server and the command-line tools, for example on a headless machine without Qt, use `cmake -DPQ_BUILD_CLIENT=OFF ..`. They still need liboqs and SQLite. On a small machine, build just the relay with `cmake --build . --target pq-server`: the default build also compiles the client core (for `pq-relay-check`), and its largest file, `messaging_engine.cpp`, can take a long time or a lot of memory on a small or single-core box (about 10 seconds and 320 MB on a desktop). You don't have to compile them on the relay machine at all: the release page has a ready-made `pq-server-linux-x86_64` (it needs the system's `libssl3` and `libsqlite3-0`, both present on current Debian and Ubuntu).
 

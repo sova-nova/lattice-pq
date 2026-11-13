@@ -89,7 +89,7 @@ bool RelayClient::connect(const std::string& host, uint16_t port, const std::vec
     }
     auto reply = msg->type == MessageType::RELAY_HELLO_REPLY ? relay::decode_hello_reply(msg->payload) : std::nullopt;
     if (!reply || reply->relay_public_key.size() != CryptoEngine::sig_public_key_size()) {
-        error = "That is not a PQ File Transfer relay, or it speaks an incompatible version";
+        error = "That is not a Lattice relay, or it speaks an incompatible version";
         close();
         return false;
     }

@@ -137,7 +137,9 @@ if(PQ_BUILD_CLIENT)
         client/app_style.cpp
         client/icons.cpp
         client/chat_entry.cpp
+        packaging/pq-client.qrc
     )
+    set_target_properties(pq-client PROPERTIES AUTORCC ON)
     target_link_libraries(pq-client PRIVATE pq_core Qt6::Core Qt6::Gui Qt6::Widgets)
     # Icons (UX polish) need Qt's SVG module. Optional: without it the app builds and works the same, just without icons.
     find_package(Qt6 QUIET COMPONENTS Svg)
@@ -177,6 +179,32 @@ if(PQ_BUILD_CLIENT)
         message(STATUS "OS keychain support: OFF (the passphrase will be asked for at every start; "
                        "install QtKeychain for Qt 6 to enable remembering it)")
     endif()
+endif()
+
+# --- Installing ---
+# `cmake --install build --prefix ~/.local` puts the programs in ~/.local/bin and the client in the
+# app menu (~/.local/share/applications) with its icon; the default prefix (/usr/local) needs sudo.
+include(GNUInstallDirs)
+# liboqs is usually built by hand into /usr/local, which many systems don't search at run time:
+# keep the folders we linked from in installed programs, as the build tree's copies have them.
+set_target_properties(pq-server pq-relay-check PROPERTIES INSTALL_RPATH_USE_LINK_PATH ON)
+install(TARGETS pq-server pq-relay-check RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+if(PQ_BUILD_CLIENT AND NOT WIN32 AND NOT APPLE)
+    set_target_properties(pq-client PROPERTIES INSTALL_RPATH_USE_LINK_PATH ON)
+    install(TARGETS pq-client RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    # The menu entry runs the installed program by its full path, so it works even when the
+    # install's bin folder isn't on the desktop session's PATH. (The AppImage uses the file as is.)
+    install(CODE "
+        file(READ \"${CMAKE_CURRENT_SOURCE_DIR}/packaging/pq-client.desktop\" entry)
+        string(REPLACE \"Exec=pq-client\" \"Exec=${CMAKE_INSTALL_FULL_BINDIR}/pq-client\" entry \"\${entry}\")
+        file(WRITE \"${CMAKE_CURRENT_BINARY_DIR}/pq-client.desktop\" \"\${entry}\")
+    ")
+    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/pq-client.desktop
+            DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
+    install(FILES packaging/pq-client.svg
+            DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps)
+    install(FILES packaging/pq-client.png
+            DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/256x256/apps)
 endif()
 
 # --- Tests ---

@@ -1,8 +1,11 @@
 [Desktop Entry]
 Type=Application
-Name=PQ File Transfer
-Comment=Post-quantum end-to-end encrypted file transfer
+Name=Lattice
+GenericName=Secure Messenger
+Comment=Post-quantum end-to-end encrypted messaging and file transfer
 Exec=pq-client
 Icon=pq-client
-Categories=Network;FileTransfer;
+StartupWMClass=pq-client
+Categories=Network;InstantMessaging;FileTransfer;
+Keywords=chat;message;encrypted;file;transfer;post-quantum;
 Terminal=false

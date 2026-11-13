@@ -1,0 +1,7 @@
+<!DOCTYPE RCC>
+<RCC version="1.0">
+    <qresource prefix="/">
+        <file>pq-client.png</file>
+        <file>pq-client.svg</file>
+    </qresource>
+</RCC>

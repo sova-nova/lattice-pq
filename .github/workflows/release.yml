@@ -98,7 +98,7 @@ jobs:
             --icon-file packaging/pq-client.png \
             --plugin qt --output appimage
           mkdir dist
-          mv PQ_File_Transfer*.AppImage dist/PQ-File-Transfer-linux-x86_64.AppImage
+          mv Lattice*.AppImage dist/Lattice-linux-x86_64.AppImage
           cp build/pq-server dist/pq-server-linux-x86_64
           cp build/pq-relay-check dist/pq-relay-check-linux-x86_64
           chmod +x dist/*
@@ -181,11 +181,11 @@ jobs:
 
       - name: Package zip
         run: |
-          mkdir -p PQ-File-Transfer
-          cp build/Release/pq-client.exe build/Release/pq-server.exe build/Release/pq-relay-check.exe PQ-File-Transfer/
-          windeployqt --release --no-translations --compiler-runtime PQ-File-Transfer/pq-client.exe
+          mkdir -p Lattice
+          cp build/Release/pq-client.exe build/Release/pq-server.exe build/Release/pq-relay-check.exe Lattice/
+          windeployqt --release --no-translations --compiler-runtime Lattice/pq-client.exe
           mkdir dist
-          7z a -tzip dist/PQ-File-Transfer-windows-x64.zip PQ-File-Transfer
+          7z a -tzip dist/Lattice-windows-x64.zip Lattice
 
       - uses: actions/upload-artifact@v7
         with:

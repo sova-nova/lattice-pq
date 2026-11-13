@@ -102,7 +102,7 @@ QLabel* plain_label(const QString& text, QWidget* parent) {
 }  // namespace
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
-    setWindowTitle("PQ File Transfer");
+    setWindowTitle("Lattice");
     setMinimumSize(480, 560);
 
     // Two tabs: the existing file transfer, and chats. Everything below up to the Chats tab is the
@@ -470,7 +470,7 @@ void MainWindow::remember_passphrase(const std::string& passphrase) {
 // The first-run guide: five steps in one window, each checked before moving on. Closing it before the end cancels set-up.
 bool MainWindow::run_first_run_guide(FirstRunChoices& out) {
     QDialog dialog(this);
-    dialog.setWindowTitle("Welcome to PQ File Transfer");
+    dialog.setWindowTitle("Welcome to Lattice");
     dialog.setMinimumWidth(580);
     auto* layout = new QVBoxLayout(&dialog);
     auto* step_label = plain_label("", &dialog);
@@ -1148,7 +1148,7 @@ void MainWindow::add_contact_from_files() {
     if (pub_kem.size() == dsa_size && pub_dsa.size() == kem_size) std::swap(pub_kem, pub_dsa);
     if (pub_kem.size() != kem_size || pub_dsa.size() != dsa_size) {
         QMessageBox::warning(this, "Add Contact",
-                             QString("Those files don't look like PQ File Transfer public keys "
+                             QString("Those files don't look like Lattice public keys "
                                      "(expected %1 and %2 bytes).").arg(static_cast<qulonglong>(kem_size)).arg(static_cast<qulonglong>(dsa_size)));
         return;
     }
