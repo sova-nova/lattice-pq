@@ -1,5 +1,6 @@
 // Integration tests for one-to-one Saved chats: real relay process, real MessagingEngines.
 // POSIX only. Usage: test_chat /path/to/pq-server
+#include "test_ports.h"
 #include "crypto_engine.h"
 #include "envelope.h"
 #include "messaging_engine.h"
@@ -217,7 +218,7 @@ int main(int argc, char** argv) {
     fs::create_directories(ROOT);
     platform_init();
 
-    Server srv{21000 + static_cast<int>(getpid() % 5000), ROOT / "relay-data/s"};
+    Server srv{free_test_port(), ROOT / "relay-data/s"};
     fs::create_directories(srv.storage.parent_path());
     if (!srv.start()) { std::cout << "FAIL could not start the relay\n"; return 1; }
     auto first_invite = srv.invite();

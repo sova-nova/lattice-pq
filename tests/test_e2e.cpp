@@ -1,5 +1,6 @@
 // End-to-end tests: real pq-server process, real TransferEngine/KeyStore/CryptoEngine.
 // Usage: test_e2e /path/to/pq-server        (POSIX only; each "user" gets its own $HOME)
+#include "test_ports.h"
 #include "crypto_engine.h"
 #include "protocol.h"
 #include "sharing.h"
@@ -196,7 +197,7 @@ static std::string raw_upload_with_filename(const std::string& sender, const Key
 int main(int argc, char** argv) {
     if (argc < 2) { std::cerr << "usage: test_e2e /path/to/pq-server\n"; return 2; }
     SERVER_BIN = argv[1];
-    PORT = 20000 + static_cast<int>(getpid() % 20000);
+    PORT = free_test_port();
     ROOT = fs::temp_directory_path() / ("pqft-e2e-" + std::to_string(getpid()));
     STORE = ROOT / "server";
     fs::remove_all(ROOT);

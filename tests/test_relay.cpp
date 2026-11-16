@@ -1,6 +1,7 @@
 // Integration tests for the v3 mailbox relay: a real pq-server process, the real RelayClient,
 // and a scripted hostile relay. POSIX only (fork/exec, popen).
 // Usage: test_relay /path/to/pq-server
+#include "test_ports.h"
 #include "crypto_engine.h"
 #include "messages.h"
 #include "platform.h"
@@ -263,7 +264,7 @@ static bool server_alive(Server& s, const Bytes& pin) {
 // =====================================================================================
 
 static void test_real_relay() {
-    Server main_srv{20100 + static_cast<int>(getpid() % 5000) * 2, ROOT / "relay-main", {"--mailbox-quota-kib", "256", "--rate-limit", "10000"}};
+    Server main_srv{free_test_port(), ROOT / "relay-main", {"--mailbox-quota-kib", "256", "--rate-limit", "10000"}};
     if (!main_srv.start()) { std::cout << "FAIL could not start the relay\n"; failures++; return; }
 
     auto first_invite = main_srv.invite();
@@ -652,8 +653,7 @@ static void test_real_relay() {
 
     std::cout << "12b. Members vouching for friends\n";
     {
-        const int base = 30000 + static_cast<int>(getpid() % 5000) * 2;
-        Server vouch{base, ROOT / "relay-vouch", {"--member-invites", "2", "--member-invites-total", "3"}};
+        Server vouch{free_test_port(), ROOT / "relay-vouch", {"--member-invites", "2", "--member-invites-total", "3"}};
         if (!vouch.start()) { std::cout << "FAIL could not start the vouching relay\n"; failures++; return; }
         auto op_invite = vouch.invite();
         const Bytes vpin = op_invite->relay_id;
@@ -763,7 +763,7 @@ static void test_real_relay() {
         CHECK(has(cli("--list-mailboxes"), "Mailboxes on this relay: 2"), "Carol and Dave remain");
         vouch.stop();
 
-        Server closed{base + 1, ROOT / "relay-closed", {"--member-invites", "0"}};
+        Server closed{free_test_port(), ROOT / "relay-closed", {"--member-invites", "0"}};
         if (!closed.start()) { std::cout << "FAIL could not start the closed relay\n"; failures++; return; }
         auto closed_invite = closed.invite();
         auto member = make_box(closed, closed_invite->relay_id);
@@ -777,8 +777,7 @@ static void test_real_relay() {
 
     std::cout << "12d. Keyrings\n";
     {
-        const int kbase = 50000 + static_cast<int>(getpid() % 5000) * 2;
-        Server keyring{kbase, ROOT / "relay-keyring", {"--keyring-max-kib", "128"}};
+        Server keyring{free_test_port(), ROOT / "relay-keyring", {"--keyring-max-kib", "128"}};
         if (!keyring.start()) { std::cout << "FAIL could not start the keyring relay\n"; failures++; return; }
         auto kinvite = keyring.invite();
         const Bytes kpin = kinvite->relay_id;
@@ -869,8 +868,7 @@ static void test_real_relay() {
 
     std::cout << "12i. Encrypted connections\n";
     {
-        const int ebase = 53000 + static_cast<int>(getpid() % 400) * 2;
-        Server enc{ebase, ROOT / "relay-encrypted", {}};
+        Server enc{free_test_port(), ROOT / "relay-encrypted", {}};
         if (!enc.start()) { std::cout << "FAIL could not start the relay\n"; failures++; return; }
         auto einvite = enc.invite();
         const Bytes epin = einvite->relay_id;
@@ -917,8 +915,7 @@ static void test_real_relay() {
 
     std::cout << "12h. Taking back an envelope that is still waiting\n";
     {
-        const int rbase = 54000 + static_cast<int>(getpid() % 400) * 2;
-        Server rv{rbase, ROOT / "relay-revoke", {}};
+        Server rv{free_test_port(), ROOT / "relay-revoke", {}};
         if (!rv.start()) { std::cout << "FAIL could not start the revocation relay\n"; failures++; return; }
         auto rinvite = rv.invite();
         const Bytes rpin = rinvite->relay_id;
@@ -943,8 +940,7 @@ static void test_real_relay() {
 
     std::cout << "12g. Prekeys\n";
     {
-        const int pbase = 55000 + static_cast<int>(getpid() % 400) * 2;
-        Server pk{pbase, ROOT / "relay-prekeys", {"--max-prekeys", "5", "--prekey-takes-per-hour", "4"}};
+        Server pk{free_test_port(), ROOT / "relay-prekeys", {"--max-prekeys", "5", "--prekey-takes-per-hour", "4"}};
         if (!pk.start()) { std::cout << "FAIL could not start the prekey relay\n"; failures++; return; }
         auto pinvite = pk.invite();
         const Bytes ppin = pinvite->relay_id;
@@ -1008,8 +1004,7 @@ static void test_real_relay() {
 
     std::cout << "12f. Attachments\n";
     {
-        const int fbase = 56000 + static_cast<int>(getpid() % 2000) * 2;
-        Server files{fbase, ROOT / "relay-files", {"--max-attachment-mib", "2", "--attachment-quota-mib", "3", "--attachment-max-days", "2", "--sweep-seconds", "1"}};
+        Server files{free_test_port(), ROOT / "relay-files", {"--max-attachment-mib", "2", "--attachment-quota-mib", "3", "--attachment-max-days", "2", "--sweep-seconds", "1"}};
         if (!files.start()) { std::cout << "FAIL could not start the attachment relay\n"; failures++; return; }
         auto finvite = files.invite();
         const Bytes fpin = finvite->relay_id;
@@ -1174,8 +1169,7 @@ static void test_real_relay() {
 
     std::cout << "12e. Deleting and redacting by agreement\n";
     {
-        const int dbase = 61000 + static_cast<int>(getpid() % 2000) * 2;
-        Server del{dbase, ROOT / "relay-delete", {}};
+        Server del{free_test_port(), ROOT / "relay-delete", {}};
         if (!del.start()) { std::cout << "FAIL could not start the deletion relay\n"; failures++; return; }
         auto dinvite = del.invite();
         const Bytes dpin = dinvite->relay_id;
@@ -1279,8 +1273,7 @@ static void test_real_relay() {
 
     std::cout << "12c. Chat archives\n";
     {
-        const int abase = 40000 + static_cast<int>(getpid() % 5000) * 2;
-        Server arch{abase, ROOT / "relay-archive", {"--archive-quota-mib", "1"}};
+        Server arch{free_test_port(), ROOT / "relay-archive", {"--archive-quota-mib", "1"}};
         if (!arch.start()) { std::cout << "FAIL could not start the archive relay\n"; failures++; return; }
         auto first_invite = arch.invite();
         const Bytes apin = first_invite->relay_id;
@@ -1412,7 +1405,7 @@ static void test_real_relay() {
 
     std::cout << "12. Rate limiting\n";
     {
-        Server limited{20101 + static_cast<int>(getpid() % 5000) * 2, ROOT / "relay-limited", {"--rate-limit", "5"}};
+        Server limited{free_test_port(), ROOT / "relay-limited", {"--rate-limit", "5"}};
         if (!limited.start()) { std::cout << "FAIL could not start the limited relay\n"; failures++; return; }
         auto inv = limited.invite();
         auto box = make_box(limited, inv->relay_id);
