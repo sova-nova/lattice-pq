@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 # The app version. The update check compares it with the latest GitHub release, and the release workflow refuses a
 # tag that doesn't match it: bump it before tagging.
-project(pq-file-transfer VERSION 1.2.0 LANGUAGES CXX)
+project(pq-file-transfer VERSION 1.3.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
