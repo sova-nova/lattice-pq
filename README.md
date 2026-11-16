@@ -6,7 +6,7 @@ Lattice (formerly PQ File Transfer) is a cross-platform messenger and file trans
 
 ## Architecture
 
-- **Client** (`pq-client`): a Qt 6 desktop application with three tabs. **Home** gives an overview, **Chats** holds one-to-one chats, groups and disappearing Private chats (with files attached to messages), and **Files** sends and receives a file by link, without any setup. The client generates and protects your keys, manages contacts, and does all the encrypting, signing and checking.
+- **Client** (`pq-client`): a Qt 6 desktop application with three tabs. **Home** gives an overview, **Chats** holds one-to-one chats, groups and disappearing Private chats (with files attached to messages), and **Files** sends and receives files by link, without any setup. The client generates and protects your keys, manages contacts, and does all the encrypting, signing and checking.
 - **Relay server** (`pq-server`): a small store-and-forward server you run yourself. It holds sealed messages in mailboxes until their owners collect them, keeps encrypted chat archives and attachments, and holds Files-tab transfers until they are fetched (24 hours at most). It never sees contents or who is writing to whom.
 - **Connections**: every connection to a relay is encrypted with a post-quantum handshake (ML-KEM-768 with X25519), and the relay proves its identity before the app sends anything. Inside that sit length-prefixed binary messages (`[u32 length][u8 type][payload]`).
 - **`pq-relay-check`**: a command-line check that a relay is reachable and genuine.
@@ -21,7 +21,7 @@ Download it from the releases page (an AppImage for Linux, a zip for Windows), o
 
 **Updates.** Once a day Lattice asks GitHub which version is the latest. When a newer one exists, Home shows a banner with **Get it on GitHub**, which opens the releases page in your browser. Nothing is ever downloaded or installed automatically. **Settings → Updates** shows your version and has **Check now**, plus **Copy link**, which copies the releases page's address so you can paste it. You can also turn the daily check off there: each check is a request to GitHub, so GitHub sees your IP address. Your relay isn't involved in this.
 
-Messaging needs a relay: someone runs one (see [running a relay](#running-a-relay)) and gives you an invite. Sending a file from the Files tab needs only a relay's address.
+Messaging needs a relay: someone runs one (see [running a relay](#running-a-relay)) and gives you an invite. Sending files from the Files tab needs only a relay's address.
 
 ### First start
 
@@ -33,7 +33,7 @@ Your keys are made on the first start and kept in `~/.pq-file-transfer/keys/` (`
 
 ### Finding your way around
 
-**Home.** The app opens on **Home** (tabs: Home, Chats, Files). It shows whether messaging is set up (with **Set up messaging…** if not), a warning with **Protect now…** while your keys aren't protected by a passphrase, a **Waiting for you** line with **Review** when message requests, group invitations or deletion requests need an answer, four big buttons (**Open chats**, with how many messages are unread; **Add contact**; **Send a file**; **Receive a file**, which take you to the right place on the Files tab), and your five most recent chats: click one to open it.
+**Home.** The app opens on **Home** (tabs: Home, Chats, Files). It shows whether messaging is set up (with **Set up messaging…** if not), a warning with **Protect now…** while your keys aren't protected by a passphrase, a **Waiting for you** line with **Review** when message requests, group invitations or deletion requests need an answer, four big buttons (**Open chats**, with how many messages are unread; **Add contact**; **Send files**; **Receive a file**, which take you to the right place on the Files tab), and your five most recent chats: click one to open it.
 
 **Chats.** On the left: **Add contact…** and **New** (a group, or a Private chat), a **waiting for you** row when message requests, group invitations or deletion requests need an answer (click it to choose one), and one list of all your chats, most recent first; groups are marked "· group" and Private chats with ⏳. Above the chat, **⋯** holds that chat's options: delivery and read receipts, **Check fingerprint…**, **Start a Private chat…**, **Block from messaging…** and **Delete chat…**.
 
@@ -124,7 +124,9 @@ Next to your saved chat with someone you can start a Private chat (**New → New
 
 #### Files in a chat
 
-Press **Attach…** next to the message box to send a file to the person or group you are talking to; anything you have typed goes with it as a caption. The file is encrypted on your computer, uploaded to your relay, and each recipient gets their own one-time download token. It reaches them only once the upload has finished, so a relay that is down just means waiting. Nothing is ever downloaded automatically: a recipient sees the file's name and size, double-clicks it, chooses a folder, and the app saves it there under a name that can't replace anything, after checking it against what you signed. The relay deletes its copy when everyone has it, when you withdraw it (double-click the file, then **Withdraw it**), or when the days you chose run out. You see how many have it ("1 of 2 have it"). The limits are the relay's: by default 5 GiB per file, 16 GiB stored per mailbox, kept up to 30 days (`--max-attachment-mib`, `--attachment-quota-mib`, `--attachment-max-days`). A chat restored from its archive shows its attachments but can't fetch them, because the key is never in the archive.
+Press **Attach…** next to the message box and choose **Files…** or **A folder…** to send to the person or group you are talking to, or drop files or folders onto the chat; anything you have typed goes with it as a caption. The file is encrypted on your computer, uploaded to your relay, and each recipient gets their own one-time download token. It reaches them only once the upload has finished, so a relay that is down just means waiting. Nothing is ever downloaded automatically: a recipient sees the file's name and size, double-clicks it, chooses a folder, and the app saves it there under a name that can't replace anything, after checking it against what you signed. The relay deletes its copy when everyone has it, when you withdraw it (double-click the file, then **Withdraw it**), or when the days you chose run out. You see how many have it ("1 of 2 have it"). The limits are the relay's: by default 5 GiB per file, 16 GiB stored per mailbox, kept up to 30 days (`--max-attachment-mib`, `--attachment-quota-mib`, `--attachment-max-days`). A chat restored from its archive shows its attachments but can't fetch them, because the key is never in the archive.
+
+**Several files, or a folder, go together as one.** Lattice packs them into one file, a plain uncompressed archive named after the folder (`Photos.lattice.tar`; several loose files go in a folder called `Files <date>`), and sends that like any attachment. Packing happens first, with a **Packing…** line and **Cancel** under the chat; the message appears once it is done. It is a snapshot: what is in the folder at that moment is what gets sent. Links and special files inside a folder are left out, and the app says so. Up to 5 GiB and 10,000 files and folders at once. The recipient sees one item (*[folder] Photos, files sent together*), and downloading it saves a new folder with the files in their original layout, under a name that can't replace anything. The archive is checked as a whole first and then unpacked, and it is refused if anything in it could write outside that folder. If unpacking fails or is interrupted, the archive is kept and the app says where; any archive tool opens it.
 
 #### Archives and restoring
 
@@ -136,17 +138,17 @@ Any member can ask to delete the whole chat, or particular messages, from the re
 
 ### Sending and receiving files (Files tab)
 
-The Files tab sends one file to one contact by link, with no messaging set up. Set the relay with **Change** beside "Using relay …" at the bottom (as `host:port`, then **Done**); it's remembered between sessions, and setting up messaging fills it in for you.
+The Files tab sends files to one contact by link, with no messaging set up. Set the relay with **Change** beside "Using relay …" at the bottom (as `host:port`, then **Done**); it's remembered between sessions, and setting up messaging fills it in for you.
 
-#### Send a file
+#### Send files
 
-In the **Send a file** card, choose the contact under **Send to**, click **Choose file and send…**, and pick a file. When it's uploaded, a **Ready to share** panel appears: click **Copy link** and send the link to the recipient. It looks like `pqft://10.8.0.1/0123abcd…` and includes the relay server. **Copy transfer ID instead** gives just the 32-character ID if you prefer. Progress and **Cancel** show while a transfer runs.
+In the **Send files** card, choose the contact under **Send to**, click **Choose what to send…**, then **Files…** (pick one or several) or **A folder…**. You can also drop files or folders onto the tab. Several files or a folder are packed into one file first and sent as one, as in a chat (see [files in a chat](#files-in-a-chat)), up to 5 GiB; **Cancel** stops the packing too. When it's uploaded, a **Ready to share** panel appears: click **Copy link** and send the link to the recipient. It looks like `pqft://10.8.0.1/0123abcd…` and includes the relay server. **Copy transfer ID instead** gives just the 32-character ID if you prefer. Progress and **Cancel** show while a transfer runs.
 
 The link or ID lets anyone download the encrypted file, but only the recipient can decrypt it. Send it over any channel.
 
 #### Receive a file
 
-In the **Receive a file** card, paste the share link (or the bare transfer ID) into the box and click **Download** (or press Enter). If the link names a different relay server than yours, the app asks which one to use. The file is verified, decrypted, and saved to the `downloads` folder (click **Open Downloads folder** to view it). Existing files are never overwritten. A new copy is saved as `name (1).ext`.
+In the **Receive a file** card, paste the share link (or the bare transfer ID) into the box and click **Download** (or press Enter). If the link names a different relay server than yours, the app asks which one to use. The file is verified, decrypted, and saved to the `downloads` folder (click **Open Downloads folder** to view it). Existing files are never overwritten. A new copy is saved as `name (1).ext`. Files sent together are unpacked into a folder there (`Photos`, or `Photos (2)` if that name is taken) and the archive is removed; if they can't be unpacked, the archive is kept and the status line says where it is.
 
 ## How it's protected
 
@@ -204,6 +206,7 @@ Anyone who has a transfer ID can download the ciphertext, but they can't decrypt
 - **Forward secrecy covers messages in transit, not archives.** A chat's archive on the relay is encrypted with a key every member holds, so someone who later steals one member's unlocked device could read that chat's archive. Private chats are never archived.
 - **One device per identity, and one relay per person.**
 - **No files in Private chats yet.**
+- **Files sent together are a snapshot, up to 5 GiB.** They are packed on your computer before anything is sent, so packing needs that much free space for a moment, and changes made to the folder afterwards aren't sent.
 - **Back up your keys folder and its passphrase.** Archives bring chats back after a reinstall (see [archives and restoring](#archives-and-restoring)), but only with your keys.
 
 ## Running a relay
@@ -431,9 +434,10 @@ ctest --test-dir build --output-on-failure
 - `relay_protocol` checks the v3 message encodings, every truncation and 3000 random corruptions of each, and the signing inputs.
 - `relay_store` checks the relay's database with a controlled clock: invites, mailbox limits, send tokens, ordering, expiry, quotas, acknowledgement scoping and persistence (Linux and macOS only).
 - `relay` starts a real relay and checks registration and invites, sign-in (including replayed and mis-bound signatures), deposits, offline delivery, push, restarts, expiry, rate limits and hijack attempts, then runs a scripted hostile relay against the client: wrong key, replayed answers, silence, duplicated and malformed envelopes, and a frame declaring 4 GiB (Linux and macOS only).
-- `e2e` starts a real `pq-server` and runs transfers between three simulated users, two of whom use passphrase-protected keys (Linux and macOS only). It covers wrong recipients, locked keys, unknown senders, tampering, truncation, hostile file names, and server restarts and expiry.
+- `file_pack` checks packing files and folders into one archive and unpacking it: layouts, names, limits, links left out, cancelling, and hostile archives (paths that climb out, links, damaged headers, names that clash only in letter case), which must leave nothing behind.
+- `e2e` starts a real `pq-server` and runs transfers between three simulated users, two of whom use passphrase-protected keys (Linux and macOS only). It covers wrong recipients, locked keys, unknown senders, tampering, truncation, hostile file names, server restarts and expiry, and files and folders sent together (unpacked on arrival, cancelled while packing, and a pack that can't be unpacked).
 - `relay_setup` checks the relay's setup safeguards, such as `--create-invite` refusing to make a second relay identity in the wrong storage folder (Linux and macOS only).
-- `group` runs up to 18 users against a real relay: creating groups, introductions, tokens passed on through the creator (which it can't read), per-member delivery, archives and restore, deletion by agreement and attachments, and hostile members and creators (Linux and macOS only; it takes about 12 minutes).
+- `group` runs up to 18 users against a real relay: creating groups, introductions, tokens passed on through the creator (which it can't read), per-member delivery, archives and restore, deletion by agreement and attachments (including files and folders sent together), and hostile members and creators (Linux and macOS only; it takes about 20 minutes). `PQ_ONLY_ATTACH=1` runs only its attachment sections, in about a minute and a half.
 - `fuzz_smoke` runs the built-in fuzzer (`pq-fuzz`) for 20 seconds against every parser of someone else's data (not on Windows).
 
 The `chat`, `relay` and `relay_protocol` suites also cover forward secrecy, Private chats and the encrypted connection. For deeper checks, `-DPQ_SANITIZE=ON` builds everything with AddressSanitizer and UndefinedBehaviorSanitizer (use few parallel jobs, as it needs a lot of memory), and `-DPQ_FUZZ=ON` with clang builds `pq-libfuzzer` for long coverage-guided fuzzing runs.
@@ -443,6 +447,8 @@ The release workflow runs the same tests against the real liboqs before it publi
 ## Compatibility
 
 Every connection to a relay must use the encrypted channel, and the message formats changed with forward secrecy and Private chats. An app or relay from before these changes can't talk to one from after them: **update the relay and every app together**, now and whenever a release says the formats changed. The relay upgrades its database by itself, and so does the app with your history (back up `<storage>/v3` on the relay first). Files-tab transfers use protocol version 2, which is not compatible with version 1.
+
+Files sent together need no change to the relay. An app from before this feature receives them as one archive (`Photos.lattice.tar`) and doesn't unpack it; any archive tool opens it.
 
 ## Security
 
