@@ -124,7 +124,7 @@ Next to your saved chat with someone you can start a Private chat (**New → New
 
 #### Files in a chat
 
-Press **Attach…** next to the message box to send a file to the person or group you are talking to; anything you have typed goes with it as a caption. The file is encrypted on your computer, uploaded to your relay, and each recipient gets their own one-time download token. It reaches them only once the upload has finished, so a relay that is down just means waiting. Nothing is ever downloaded automatically: a recipient sees the file's name and size, double-clicks it, chooses a folder, and the app saves it there under a name that can't replace anything, after checking it against what you signed. The relay deletes its copy when everyone has it, when you withdraw it (double-click the file, then **Withdraw it**), or when the days you chose run out. You see how many have it ("1 of 2 have it"). The limits are the relay's: by default 1 GiB per file, 4 GiB stored per mailbox, kept up to 30 days (`--max-attachment-mib`, `--attachment-quota-mib`, `--attachment-max-days`). A chat restored from its archive shows its attachments but can't fetch them, because the key is never in the archive.
+Press **Attach…** next to the message box to send a file to the person or group you are talking to; anything you have typed goes with it as a caption. The file is encrypted on your computer, uploaded to your relay, and each recipient gets their own one-time download token. It reaches them only once the upload has finished, so a relay that is down just means waiting. Nothing is ever downloaded automatically: a recipient sees the file's name and size, double-clicks it, chooses a folder, and the app saves it there under a name that can't replace anything, after checking it against what you signed. The relay deletes its copy when everyone has it, when you withdraw it (double-click the file, then **Withdraw it**), or when the days you chose run out. You see how many have it ("1 of 2 have it"). The limits are the relay's: by default 5 GiB per file, 16 GiB stored per mailbox, kept up to 30 days (`--max-attachment-mib`, `--attachment-quota-mib`, `--attachment-max-days`). A chat restored from its archive shows its attachments but can't fetch them, because the key is never in the archive.
 
 #### Archives and restoring
 
@@ -281,14 +281,25 @@ pq-relay-check 'pqft-relay://...'            # full round trip using one invite 
 | `--keyring-max-kib N` | 4096 | Largest keyring one mailbox may store (each chat adds about 6 KB) |
 | `--max-prekeys N` | 200 | One-time prekeys one mailbox may keep (for forward secrecy) |
 | `--prekey-takes-per-hour N` | 60 | Prekeys one contact (send token) may take in an hour |
-| `--max-attachment-mib N` | 1024 | Largest single chat attachment |
-| `--attachment-quota-mib N` | 4096 | All of one mailbox's stored attachments together |
+| `--max-attachment-mib N` | 5120 | Largest single chat attachment |
+| `--attachment-quota-mib N` | 16384 | All of one mailbox's stored attachments together |
 | `--attachment-max-days N` | 30 | How long an attachment may be kept |
 | `--member-invites N` | 3 | Unused invites one member may have at once; 0 turns member invites off |
 | `--member-invites-total N` | 10 | Most people one member may ever invite |
 | `--list-mailboxes` | | Show every mailbox, who vouched for it and what is queued, then exit |
 | `--remove-mailbox ID` | | Remove a mailbox (ID prefix of 8+ characters), then exit |
 | `--with-invitees` | | With `--remove-mailbox`: also everyone it invited, and theirs |
+
+At startup the relay prints its storage limits and the free space where it keeps things, for example:
+
+```
+Limits: attachments up to 5 GiB each and 16 GiB stored per person (--max-attachment-mib, --attachment-quota-mib); Files-tab transfers up to 50 GiB in all (--quota-gb).
+Free space for storage: 212.4 GiB.
+```
+
+It adds a `Warning:` line for any setting that would stop the app's largest transfers (files sent together can be up to 5 GiB), and when there is less free space than one of them needs. Attachments have no relay-wide total, so free disk space is their real limit: keep an eye on it.
+
+**Upgrading from 1.2.0 or earlier.** The default attachment limits went up so files can be sent together: 1 GiB to **5 GiB** per file, and 4 GiB to **16 GiB** stored per person. A relay restarted with the new version uses them unless you set them. To keep the old ones, add `--max-attachment-mib 1024 --attachment-quota-mib 4096`. An older relay keeps working with new apps; it just refuses files over its limit, and the app says what the limit is.
 
 A systemd unit for the relay (the `ExecStart` line is the important part):
 

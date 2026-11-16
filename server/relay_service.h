@@ -8,6 +8,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -38,13 +39,20 @@ struct RelayLimits {
     uint32_t max_prekeys = 200;          // one-time prekeys one mailbox may have on the relay
     uint32_t prekey_takes_per_hour = 60; // prekeys one send token may take in an hour, so a contact can't drain the pool
     // Attachments (M5).
-    uint64_t max_attachment_bytes = 1024ull * 1024 * 1024;     // one file
-    uint64_t attachment_quota_bytes = 4096ull * 1024 * 1024;   // all of one mailbox's stored files together
+    // A pack of files sent together (bulk transfer) can be 5 GiB, so one file may be that large, and one person can keep
+    // three of them at once.
+    uint64_t max_attachment_bytes = 5120ull * 1024 * 1024;      // one file
+    uint64_t attachment_quota_bytes = 16384ull * 1024 * 1024;   // all of one mailbox's stored files together
     int64_t attachment_max_seconds = 30ll * 24 * 3600;         // how far ahead a file's expiry may be
     int64_t abandoned_upload_seconds = 3600;                   // an upload not finished by then is thrown away
     int idle_timeout_seconds = 180;                    // clients ping every minute or so
     int poll_millis = 250;                             // how often a connected owner is checked for news
 };
+
+// What the relay prints at startup about how much it will store: the limits in one line, the free space, and a warning
+// for each setting that would stop the app's largest transfers (a pack of files is up to 5 GiB). `files_tab_quota` is
+// --quota-gb (Files-tab transfers, the whole relay); `free_bytes` is the free space where things are stored, if known.
+std::vector<std::string> describe_limits(const RelayLimits& limits, uint64_t files_tab_quota, const std::optional<uint64_t>& free_bytes);
 
 // The v3 mailbox relay: its identity key, invites, sessions and expiry. It sees only mailbox
 // IDs, send token hashes and sealed envelopes, never keys of identities, names or content.

@@ -1,5 +1,6 @@
 // Tests for the relay's SQLite store, with a controlled clock (no waiting for expiry).
 #include "relay_store.h"
+#include "relay_service.h"
 
 #include <sqlite3.h>
 
@@ -570,6 +571,53 @@ int main() {
         CHECK(swept.archives >= 1 && !s.archive_info(id(0x35), 3001), "one nobody joined by the end of the window is removed");
         CHECK(s.archive_info(arch, 3001) && s.fetch_entries(arch, 1, 10).size() == 2, "while one with members keeps all its entries");
         { RelayStore reopened(dir / "archives.db"); CHECK(reopened.archive_info(arch, 3001) && reopened.archive_info(arch, 3001)->head.hash == h2, "archives survive a restart"); }
+    }
+
+    std::cout << "\nWhat the relay says about its limits at startup\n";
+    {
+        const uint64_t MiB = 1024ull * 1024, GiB = 1024 * MiB;
+        auto joined = [](const std::vector<std::string>& lines) {
+            std::string all;
+            for (const auto& l : lines) all += l + "\n";
+            return all;
+        };
+        auto warnings = [](const std::vector<std::string>& lines) {
+            size_t n = 0;
+            for (const auto& l : lines) n += l.rfind("Warning:", 0) == 0;
+            return n;
+        };
+        relay::RelayLimits defaults;
+        CHECK(defaults.max_attachment_bytes == 5 * GiB && defaults.attachment_quota_bytes == 16 * GiB,
+              "the defaults allow a 5 GiB pack, and three of them per person");
+        auto d = relay::describe_limits(defaults, 50 * GiB, 200 * GiB);
+        CHECK(warnings(d) == 0, "the defaults, with room on disk: no warnings");
+        CHECK(joined(d).find("attachments up to 5 GiB each and 16 GiB stored per person") != std::string::npos &&
+                  joined(d).find("Files-tab transfers up to 50 GiB") != std::string::npos,
+              "the limits line says what they are");
+        CHECK(joined(d).find("Free space for storage: 200 GiB.") != std::string::npos, "and the free space");
+        CHECK(joined(relay::describe_limits(defaults, 50 * GiB, std::nullopt)).find("Free space") == std::string::npos, "free space left out when unknown");
+
+        relay::RelayLimits old = defaults;
+        old.max_attachment_bytes = 1024 * MiB;
+        old.attachment_quota_bytes = 4096 * MiB;
+        auto o = relay::describe_limits(old, 50 * GiB, 200 * GiB);
+        CHECK(warnings(o) == 1 && joined(o).find("--max-attachment-mib 5120") != std::string::npos,
+              "the old 1 GiB limit warns, and says how to allow packs");
+        CHECK(joined(o).find("attachments up to 1 GiB each and 4 GiB stored") != std::string::npos, "and shows the old values");
+
+        relay::RelayLimits tight = defaults;
+        tight.attachment_quota_bytes = 4 * GiB;
+        CHECK(joined(relay::describe_limits(tight, 50 * GiB, 200 * GiB)).find("smaller than --max-attachment-mib") != std::string::npos,
+              "a per-person quota below the largest file: warned");
+        tight.attachment_quota_bytes = 8 * GiB;
+        CHECK(joined(relay::describe_limits(tight, 50 * GiB, 200 * GiB)).find("only one attachment of the largest size") != std::string::npos,
+              "room for only one of the largest: warned");
+        CHECK(joined(relay::describe_limits(defaults, 4 * GiB, 200 * GiB)).find("--quota-gb is less than 5 GiB") != std::string::npos,
+              "a Files-tab quota below one pack: warned");
+        auto low = relay::describe_limits(defaults, 50 * GiB, 3 * GiB);
+        CHECK(warnings(low) == 1 && joined(low).find("less free space") != std::string::npos, "little free space: warned");
+        CHECK(joined(relay::describe_limits(defaults, 50 * GiB, 1536 * MiB)).find("Free space for storage: 1.5 GiB.") != std::string::npos,
+              "fractional sizes are shown with one decimal");
     }
 
     fs::remove_all(dir);

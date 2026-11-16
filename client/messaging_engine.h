@@ -59,7 +59,7 @@ public:
         int archive_checkpoint_every = 50;
         int archive_checkpoint_max_age_seconds = 24 * 3600;
         int keyring_check_seconds = 60;  // how often to see whether the keyring on the relay needs updating
-        uint64_t max_attachment_bytes = 1024ull * 1024 * 1024;  // the largest file this app will try to send (a relay may allow less)
+        uint64_t max_attachment_bytes = 5ull * 1024 * 1024 * 1024;  // the largest file this app will try to send (a relay may allow less); a pack of files sent together is up to 5 GiB
         // Prekeys (M6).
         int prekey_check_seconds = 60;                     // how often to see whether the relay's pool needs topping up
         size_t prekey_pool_target = 100;                   // one-time prekeys to keep on the relay

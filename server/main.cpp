@@ -503,8 +503,9 @@ static void print_usage(const char* prog) {
               << "  --keyring-max-kib N         largest keyring one mailbox may store (default 4096)\n"
               << "  --max-prekeys N             one-time prekeys one mailbox may keep (default 200)\n"
               << "  --prekey-takes-per-hour N   prekeys one send token may take in an hour (default 60)\n"
-              << "  --max-attachment-mib N      largest single attachment (default 1024)\n"
-              << "  --attachment-quota-mib N    all of one mailbox's stored attachments together (default 4096)\n"
+              << "  --max-attachment-mib N      largest single attachment (default " << relay::RelayLimits{}.max_attachment_bytes / (1024 * 1024) << ")\n"
+              << "  --attachment-quota-mib N    all of one mailbox's stored attachments together (default "
+              << relay::RelayLimits{}.attachment_quota_bytes / (1024 * 1024) << ")\n"
               << "  --attachment-max-days N     how long an attachment may be kept for (default 30)\n"
               << "\nMembers vouching for friends: anyone on the relay can make single-use invites from the app.\n"
               << "The relay records who vouched for whom.\n"
@@ -726,6 +727,12 @@ int main(int argc, char* argv[]) {
     restore_transfers();
     std::cout << "Storage directory: " << g_storage_dir.string() << std::endl;
     std::cout << "Mailbox relay ID: " << g_relay->relay_id_hex() << std::endl;
+    {
+        std::error_code space_ec;
+        const auto space = fs::space(g_storage_dir, space_ec);
+        for (const auto& line : relay::describe_limits(limits, g_storage_quota, space_ec ? std::nullopt : std::optional<uint64_t>(space.available)))
+            std::cout << line << std::endl;
+    }
 
     socket_t server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd == INVALID_SOCKET_VAL) {

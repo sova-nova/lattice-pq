@@ -7,6 +7,7 @@
 #include "scope_exit.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <ctime>
 #include <fstream>
 #include <set>
@@ -20,6 +21,40 @@
 namespace fs = std::filesystem;
 
 namespace relay {
+
+namespace {
+
+std::string size_text(uint64_t bytes) {
+    const uint64_t mib = 1024ull * 1024, gib = mib * 1024;
+    char buf[48];
+    if (bytes >= gib && bytes % gib == 0) std::snprintf(buf, sizeof(buf), "%llu GiB", static_cast<unsigned long long>(bytes / gib));
+    else if (bytes >= gib) std::snprintf(buf, sizeof(buf), "%.1f GiB", static_cast<double>(bytes) / static_cast<double>(gib));
+    else std::snprintf(buf, sizeof(buf), "%llu MiB", static_cast<unsigned long long>(bytes / mib));
+    return buf;
+}
+
+}  // namespace
+
+std::vector<std::string> describe_limits(const RelayLimits& limits, uint64_t files_tab_quota, const std::optional<uint64_t>& free_bytes) {
+    constexpr uint64_t PACK_BYTES = 5ull * 1024 * 1024 * 1024;  // the app's largest pack of files sent together
+    std::vector<std::string> out;
+    out.push_back("Limits: attachments up to " + size_text(limits.max_attachment_bytes) + " each and " + size_text(limits.attachment_quota_bytes) +
+                  " stored per person (--max-attachment-mib, --attachment-quota-mib); Files-tab transfers up to " + size_text(files_tab_quota) +
+                  " in all (--quota-gb).");
+    if (free_bytes) out.push_back("Free space for storage: " + size_text(*free_bytes) + ".");
+    if (limits.max_attachment_bytes < PACK_BYTES)
+        out.push_back("Warning: attachments are limited to " + size_text(limits.max_attachment_bytes) + ", so files sent together in a chat (up to " +
+                      size_text(PACK_BYTES) + ") can be refused. --max-attachment-mib 5120 allows them.");
+    if (limits.attachment_quota_bytes < limits.max_attachment_bytes)
+        out.push_back("Warning: --attachment-quota-mib is smaller than --max-attachment-mib, so nobody can store an attachment of the largest size.");
+    else if (limits.attachment_quota_bytes < 2 * limits.max_attachment_bytes)
+        out.push_back("Warning: --attachment-quota-mib leaves room for only one attachment of the largest size per person at a time.");
+    if (files_tab_quota < PACK_BYTES)
+        out.push_back("Warning: --quota-gb is less than " + size_text(PACK_BYTES) + ", so files sent together from the Files tab can be refused.");
+    if (free_bytes && *free_bytes < std::max(limits.max_attachment_bytes, PACK_BYTES))
+        out.push_back("Warning: there is less free space than one transfer of the largest size needs; uploads will fail when the disk fills up.");
+    return out;
+}
 
 namespace {
 
