@@ -3,11 +3,13 @@
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
+#include <sstream>
 #include <string>
 
 #include "archive.h"
 #include "crypto_engine.h"
 #include "envelope.h"
+#include "file_pack.h"
 #include "identity_bundle.h"
 #include "keyring.h"
 #include "message_record.h"
@@ -420,6 +422,45 @@ std::vector<Bytes> seeds_text() {
             str(1, build_share_link(ServerAddress{"10.0.0.1", 9000}, std::string(32, 'a'))), str(2, build_relay_invite(invite)), str(3, "relay.example:9000")};
 }
 
+// --- Packs of files (bulk transfers) ---
+
+bool run_pack(const uint8_t* data, size_t size) {
+    std::istringstream in(std::string(reinterpret_cast<const char*>(data), size));
+    std::vector<file_pack::Entry> entries;
+    std::string error;
+    if (!file_pack::scan(in, size, entries, error)) return false;
+    // Whatever is accepted must be safe to unpack, and laid out exactly as its headers say.
+    uint64_t expected = file_pack::detail::end_of_archive().size();
+    for (const auto& e : entries) {
+        if (!file_pack::detail::valid_path(e.path)) violated("pack: accepted an unsafe path");
+        if (e.path.rfind(entries[0].path, 0) != 0) violated("pack: accepted a path outside the top folder");
+        expected += file_pack::detail::entry_header(e.path, e.dir, e.size, e.mtime).size() + e.size + file_pack::detail::padding(e.size);
+    }
+    if (expected != size) violated("pack: accepted bytes its headers don't account for");
+    return true;
+}
+
+std::vector<Bytes> seeds_pack() {
+    auto entry = [](Bytes& out, const std::string& path, bool dir, const std::string& data) {
+        const Bytes h = file_pack::detail::entry_header(path, dir, data.size(), 1700000000);
+        out.insert(out.end(), h.begin(), h.end());
+        out.insert(out.end(), data.begin(), data.end());
+        out.insert(out.end(), static_cast<size_t>(file_pack::detail::padding(data.size())), 0);
+    };
+    Bytes small, unicode;
+    entry(small, "Top", true, "");
+    entry(small, "Top/a.txt", false, "hello");
+    entry(small, "Top/sub", true, "");
+    entry(small, "Top/sub/.hidden", false, std::string(600, 'x'));
+    entry(unicode, "Fotos", true, "");
+    entry(unicode, "Fotos/" + std::string(120, 'l') + ".jpg", false, "long");
+    entry(unicode, "Fotos/Ã¼nÃ¯cÃ¶" "dÃ©.txt", false, "");
+    const Bytes end = file_pack::detail::end_of_archive();
+    small.insert(small.end(), end.begin(), end.end());
+    unicode.insert(unicode.end(), end.begin(), end.end());
+    return {small, unicode};
+}
+
 // --- The older transfer-ID file transfer ---
 
 bool run_v2(const uint8_t* data, size_t size) {
@@ -448,7 +489,7 @@ const std::vector<Target>& targets() {
         {"relay", run_relay, seeds_relay},       {"records", run_records, seeds_records}, {"envelope", run_envelope, seeds_envelope},
         {"prekey", run_prekey, seeds_prekey},    {"keyring", run_keyring, seeds_keyring}, {"archive", run_archive, seeds_archive},
         {"channel", run_channel, seeds_channel}, {"bundle", run_bundle, seeds_bundle},    {"text", run_text, seeds_text},
-        {"v2", run_v2, seeds_v2},
+        {"v2", run_v2, seeds_v2},        {"pack", run_pack, seeds_pack},
     };
     return t;
 }

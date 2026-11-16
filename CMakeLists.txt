@@ -113,6 +113,7 @@ add_library(pq_core STATIC
     client/history_store.cpp
     client/messaging_engine.cpp
     client/update_check.cpp
+    client/file_pack.cpp
 )
 # Only this file needs the version, so bumping it doesn't rebuild the whole library.
 set_property(SOURCE client/update_check.cpp APPEND PROPERTY COMPILE_DEFINITIONS PQ_APP_VERSION="${PROJECT_VERSION}")
@@ -286,6 +287,11 @@ if(PQ_BUILD_TESTS)
         add_dependencies(pq-test-relay-setup pq-server)
         add_test(NAME relay_setup COMMAND pq-test-relay-setup $<TARGET_FILE:pq-server>)
         set_tests_properties(relay_setup PROPERTIES TIMEOUT 60)
+
+        add_executable(pq-test-file-pack tests/test_file_pack.cpp)
+        target_link_libraries(pq-test-file-pack PRIVATE pq_core)
+        pq_warnings(pq-test-file-pack)
+        add_test(NAME file_pack COMMAND pq-test-file-pack)
 
         add_executable(pq-test-group tests/test_group.cpp)
         target_link_libraries(pq-test-group PRIVATE pq_core)
