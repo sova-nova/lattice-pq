@@ -17,6 +17,7 @@
 
 #include "archive.h"
 #include "attachment.h"
+#include "file_pack.h"
 #include "prekey_vault.h"
 #include "private_store.h"
 #include "envelope.h"
@@ -169,7 +170,8 @@ public:
         size_t recipients = 0;   // outgoing: how many it is for
         size_t redeemed = 0;     // outgoing: how many have fetched it
         std::string saved_path;  // incoming, once fetched: where it was saved
-        std::string note;        // why it failed, or how the last attempt went
+        std::string note;        // why it failed, or how the last attempt went ("Unpacking" while a pack is unpacked)
+        bool pack = false;       // files sent together: unpacked into a folder when downloaded (see send_files)
     };
     struct ChatMessage {
         int64_t row = 0;
@@ -369,6 +371,26 @@ public:
     // Bytes done and in all, for an upload or download under way. False if nothing is.
     bool attachment_progress(const std::string& file_id, uint64_t& done, uint64_t& total);
 
+    // --- Files sent together (bulk transfers) ---
+    // Several files, or a folder, sent as one attachment: they are packed into one file (file_pack: a plain tar archive under
+    // one top folder) named "<top folder>.lattice.tar", and that is sent like any attachment. One folder keeps its name; anything
+    // else goes in a folder called "Files YYYY-MM-DD". A single plain file is simply sent as an attachment. What was chosen is
+    // checked here (sizes, counts and names: nothing is read yet); the packing runs in the background, and the message appears once
+    // it is done. Follow it with packing(). Links inside folders are left out (and said so). A recipient's app unpacks the files
+    // into a new folder once they are downloaded and checked; an older app just saves the archive.
+    bool send_files(const std::string& contact_fp, const std::vector<std::filesystem::path>& sources, const std::string& caption, int days, std::string& error);
+    bool send_group_files(const std::string& group_id, const std::vector<std::filesystem::path>& sources, const std::string& caption, int days, std::string& error);
+    struct Packing {
+        std::string id;
+        std::string conversation;  // the contact's fingerprint, or the group's ID
+        bool group = false;
+        std::string name;          // the top folder
+        size_t files = 0;
+        uint64_t done = 0, total = 0;
+    };
+    std::vector<Packing> packing();  // what is being packed (or waiting to be), oldest first
+    void cancel_packing(const std::string& id);
+
     // --- Private chats (M7) ---
     // A Private chat is a separate, timed conversation with a contact (one to one), next to the Saved chat with them. Its rule is
     // fixed when it starts: how long messages last (1 hour, 1 day, 7 days or 30 days) and whether that counts from sending
@@ -513,6 +535,29 @@ private:
     std::map<std::string, size_t> deletion_submit_attempts_;  // operation -> acceptances held at the last attempt
     std::chrono::steady_clock::time_point next_deletion_check_{};
     // Attachments: sending and fetching run on one background thread, so a large file never holds up messages.
+    // Files sent together: packed one job at a time on their own thread, into outgoing_dir_/<random>/<name>.lattice.tar, which is
+    // deleted once its upload is over (clean_outgoing).
+    struct PackJob {
+        std::string id, conversation, caption;
+        bool group = false;
+        int days = 7;
+        file_pack::Plan plan;
+        std::filesystem::path dir;
+        uint64_t done = 0;
+        bool cancelled = false;
+        bool sending = false;  // packed, and its message is being made: too late to cancel
+    };
+    bool queue_pack(const std::string& conversation, bool group, const std::vector<std::filesystem::path>& sources, const std::string& caption, int days, std::string& error);
+    void pack_loop();
+    void stop_packing();
+    void clean_outgoing();
+    std::filesystem::path outgoing_dir_;
+    std::mutex pack_mutex_;  // guards the fields below
+    std::condition_variable pack_cv_;
+    std::deque<std::shared_ptr<PackJob>> pack_jobs_;  // the first is the one being packed
+    std::thread pack_thread_;
+    bool pack_stop_ = false;
+
     struct TransferJob {
         enum Kind { Upload, Download } kind = Upload;
         Bytes file_id;
@@ -521,8 +566,14 @@ private:
     };
     AttachmentView attachment_view(const chat::AttachmentInfo& info);
     void note_incoming_attachment(const chat::SignedRecord& record, const std::vector<chat::AttachmentGrant>& grants);
+    // `known`: the file's fingerprint when it was just computed (a pack, while it was written), so it isn't read again.
     bool start_attachment_send(const Bytes& conversation_id, const std::vector<std::string>& recipients, const Bytes& recipients_hash,
-                               const std::vector<Bytes>& seen, const std::filesystem::path& file, const std::string& caption, int days, std::string& error);
+                               const std::vector<Bytes>& seen, const std::filesystem::path& file, const std::string& caption, int days, std::string& error,
+                               const attachment::Fingerprint* known = nullptr);
+    bool send_attachment_to(const std::string& contact_fp, const std::filesystem::path& file, const std::string& caption, int days, std::string& error,
+                            const attachment::Fingerprint* known);
+    bool send_group_attachment_to(const std::string& group_id, const std::filesystem::path& file, const std::string& caption, int days, std::string& error,
+                                  const attachment::Fingerprint* known);
     void queue_transfer(TransferJob job);
     void transfer_loop();
     void stop_transfers();

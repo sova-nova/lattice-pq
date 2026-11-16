@@ -14,9 +14,14 @@
 #include <QFormLayout>
 #include <QClipboard>
 #include <QDateTime>
+#include <QDragEnterEvent>
+#include <QDropEvent>
+#include <QMimeData>
+#include <QUrl>
 #include <QAction>
 #include <QDialog>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QInputDialog>
@@ -87,6 +92,12 @@ static QString human_size(uint64_t bytes) {
     return QString(buf);
 }
 
+// A pack's name without its ".lattice.tar": the folder it unpacks into.
+static QString pack_title(const std::string& name) {
+    const std::string suffix = file_pack::NAME_SUFFIX;
+    return qstr(file_pack::is_pack_name(name) ? name.substr(0, name.size() - suffix.size()) : name);
+}
+
 // Where an attachment stands, in words.
 static QString attachment_state_text(MessagingEngine& engine, const MessagingEngine::AttachmentView& a) {
     auto number = [](size_t n) { return QString::number(static_cast<qulonglong>(n)); };
@@ -100,7 +111,11 @@ static QString attachment_state_text(MessagingEngine& engine, const MessagingEng
         case HistoryStore::AttachAvailable:
             if (a.outgoing) return number(a.redeemed) + " of " + number(a.recipients) + " have it, until " + expires;
             return "double-click to download, until " + expires + (a.note.empty() ? QString() : "  (last try: " + qstr(a.note) + ")");
-        case HistoryStore::AttachTransferred: return a.outgoing ? QString("everyone has it") : "saved to " + qstr(a.saved_path);
+        case HistoryStore::AttachTransferred:
+            if (a.outgoing) return QString("everyone has it");
+            if (a.pack && a.note == "Unpacking") return moving ? "unpacking " + percent : QString("unpacking");
+            if (a.pack && !a.note.empty()) return "downloaded, not unpacked: " + qstr(a.note);
+            return "saved to " + qstr(a.saved_path);
         case HistoryStore::AttachExpired: return QString("expired: it is no longer on the relay");
         case HistoryStore::AttachWithdrawn: return a.outgoing ? QString("you withdrew it") : QString("the sender took it back");
         case HistoryStore::AttachFailed: return "could not be sent: " + qstr(a.note);
@@ -113,9 +128,10 @@ static QString attachment_state_text(MessagingEngine& engine, const MessagingEng
 
 // The line a chat shows for an attachment: what it is, how big, where it stands, and its caption.
 static QString attachment_line(MessagingEngine& engine, const MessagingEngine::AttachmentView& a, const std::string& caption, bool& moving) {
-    QString text = "[file] " + qstr(a.name) + " (" + human_size(a.size) + ")  -  " + attachment_state_text(engine, a);
+    QString text = a.pack ? "[folder] " + pack_title(a.name) + " (files sent together, " + human_size(a.size) + ")  -  " + attachment_state_text(engine, a)
+                          : "[file] " + qstr(a.name) + " (" + human_size(a.size) + ")  -  " + attachment_state_text(engine, a);
     if (!caption.empty()) text += "\n    " + qstr(caption);
-    moving |= a.state == HistoryStore::AttachUploading || a.state == HistoryStore::AttachDownloading;
+    moving |= a.state == HistoryStore::AttachUploading || a.state == HistoryStore::AttachDownloading || (a.pack && a.note == "Unpacking");
     return text;
 }
 
@@ -364,11 +380,38 @@ ChatWidget::ChatWidget(KeyStore& keys, const std::filesystem::path& history_path
     set_button_icon(send_button_, "send", QColor("#ffffff"));
     attach_button_ = new QPushButton("Attach…", this);
     set_button_icon(attach_button_, "paperclip");
-    attach_button_->setToolTip("Send a file. What you have typed is sent with it as a caption.");
+    attach_button_->setToolTip("Send files or a folder (or drop them here). What you have typed is sent with them as a caption.");
+    {
+        auto* attach_menu = new QMenu(attach_button_);
+        QAction* files = attach_menu->addAction("Files…");
+        files->setToolTip("One file, or several at once (they arrive together, in one folder)");
+        QAction* folder = attach_menu->addAction("A folder…");
+        folder->setToolTip("A folder and everything in it, arriving as a folder with the same layout");
+        connect(files, &QAction::triggered, this, [this] { attach_files(); });
+        connect(folder, &QAction::triggered, this, [this] { attach_folder(); });
+        attach_button_->setMenu(attach_menu);
+    }
     input_row->addWidget(input_, 1);
     input_row->addWidget(attach_button_);
     input_row->addWidget(send_button_);
+    // While files for this chat are being packed: what, how far, and a way to stop.
+    packing_row_ = new QWidget(this);
+    auto* packing_layout = new QHBoxLayout(packing_row_);
+    packing_layout->setContentsMargins(0, 0, 0, 0);
+    packing_label_ = new QLabel(packing_row_);
+    packing_label_->setTextFormat(Qt::PlainText);
+    auto* packing_cancel = new QPushButton("Cancel", packing_row_);
+    packing_cancel->setToolTip("Stop packing these files; nothing is sent");
+    connect(packing_cancel, &QPushButton::clicked, this, [this] {
+        if (engine_ && !packing_id_.isEmpty()) engine_->cancel_packing(packing_id_.toStdString());
+        update_packing_row();
+    });
+    packing_layout->addWidget(packing_label_, 1);
+    packing_layout->addWidget(packing_cancel);
+    packing_row_->setVisible(false);
+    right->addWidget(packing_row_);
     right->addLayout(input_row);
+    setAcceptDrops(true);
     body->addLayout(right, 1);
     root->addLayout(body, 1);
 
@@ -416,7 +459,6 @@ ChatWidget::ChatWidget(KeyStore& keys, const std::filesystem::path& history_path
     connect(revoke_button_, &QPushButton::clicked, this, [this] { revoke_access_for_current(); });
     connect(people_button_, &QPushButton::clicked, this, [this] { people_clicked(); });
     connect(send_button_, &QPushButton::clicked, this, [this] { send_current(); });
-    connect(attach_button_, &QPushButton::clicked, this, [this] { attach_file(); });
     auto* progress_timer = new QTimer(this);  // while a file is moving, redraw now and then so its progress shows
     connect(progress_timer, &QTimer::timeout, this, [this] {
         if (!animating_) return;
@@ -527,6 +569,7 @@ void ChatWidget::report_unread() {
 
 void ChatWidget::refresh_if_changed() {
     if (!engine_) return;
+    update_packing_row();
 
     {
         const ConnectionState state = connection_state();
@@ -1738,51 +1781,116 @@ void ChatWidget::start_private_chat() {
     render_privates();
 }
 
-void ChatWidget::attach_file() {
+bool ChatWidget::can_attach() const {
+    return engine_ && attach_button_->isEnabled() && (!current_group_.isEmpty() || !current_fp_.isEmpty());
+}
+
+void ChatWidget::attach_files() {
+    if (!can_attach()) return;
+    const QStringList chosen = QFileDialog::getOpenFileNames(this, "Choose files to send (several go together, in one folder)", QString());
+    if (!chosen.isEmpty()) send_paths(chosen);
+}
+
+void ChatWidget::attach_folder() {
+    if (!can_attach()) return;
+    const QString chosen = QFileDialog::getExistingDirectory(this, "Choose a folder to send", QString());
+    if (!chosen.isEmpty()) send_paths({chosen});
+}
+
+void ChatWidget::send_paths(const QStringList& paths) {
+    if (!can_attach() || paths.isEmpty()) return;
     const bool group = !current_group_.isEmpty();
-    if (!group && current_fp_.isEmpty()) return;
-    const QString chosen = QFileDialog::getOpenFileName(this, "Choose a file to send", QString());
-    if (chosen.isEmpty()) return;
+    const bool together = paths.size() > 1 || QFileInfo(paths.first()).isDir();
     bool ok = false;
-    const int days = QInputDialog::getInt(this, "Keep it on the relay", "For how many days should the relay keep it for the others to download? (1 to 30)", 7, 1, 30, 1, &ok);
+    const int days = QInputDialog::getInt(this, "Keep it on the relay",
+                                          QString(together ? "For how many days should the relay keep these files" : "For how many days should the relay keep it") +
+                                              " for the others to download? (1 to 30)",
+                                          7, 1, 30, 1, &ok);
     if (!ok) return;
     const std::string caption = input_->text().trimmed().toStdString();
-    const auto path = std::filesystem::u8path(chosen.toStdString());
+    std::vector<std::filesystem::path> sources;
+    for (const QString& p : paths) sources.push_back(std::filesystem::u8path(p.toStdString()));
     std::string error;
-    QGuiApplication::setOverrideCursor(Qt::WaitCursor);  // a very large file takes a moment to measure
-    const bool sent = group ? engine_->send_group_attachment(current_group_.toStdString(), path, caption, days, error)
-                            : engine_->send_attachment(current_fp_.toStdString(), path, caption, days, error);
+    QGuiApplication::setOverrideCursor(Qt::WaitCursor);  // a single large file is measured now; a folder's contents are listed
+    const bool sent = group ? engine_->send_group_files(current_group_.toStdString(), sources, caption, days, error)
+                            : engine_->send_files(current_fp_.toStdString(), sources, caption, days, error);
     QGuiApplication::restoreOverrideCursor();
     if (!sent) {
-        QMessageBox::warning(this, "Attach a file", qstr(error));
+        QMessageBox::warning(this, together ? "Send files" : "Attach a file", qstr(error));
         return;
     }
     input_->clear();
+    update_packing_row();
     refresh();
+}
+
+void ChatWidget::update_packing_row() {
+    if (!engine_ || !packing_row_) return;
+    const std::string here = !current_group_.isEmpty() ? current_group_.toStdString() : current_fp_.toStdString();
+    const auto jobs = engine_->packing();
+    const MessagingEngine::Packing* shown = nullptr;
+    size_t waiting = 0;
+    for (const auto& j : jobs) {
+        if (here.empty() || j.conversation != here) continue;
+        if (!shown) shown = &j;
+        else waiting++;
+    }
+    packing_row_->setVisible(shown != nullptr);
+    if (!shown) {
+        packing_id_.clear();
+        return;
+    }
+    packing_id_ = qstr(shown->id);
+    const QString percent = shown->total ? QString::number(static_cast<qulonglong>(shown->done * 100 / shown->total)) + "%" : QString();
+    packing_label_->setText("Packing " + qstr(shown->name) + " (" + QString::number(static_cast<qulonglong>(shown->files)) + " files, " + human_size(shown->total) +
+                            ") to send… " + percent + (waiting ? "  (" + QString::number(static_cast<qulonglong>(waiting)) + " more waiting)" : QString()));
+}
+
+void ChatWidget::dragEnterEvent(QDragEnterEvent* event) {
+    if (!can_attach() || !event->mimeData()->hasUrls()) return;
+    for (const QUrl& url : event->mimeData()->urls())
+        if (!url.isLocalFile()) return;  // only files on this computer
+    event->acceptProposedAction();
+}
+
+void ChatWidget::dropEvent(QDropEvent* event) {
+    QStringList paths;
+    for (const QUrl& url : event->mimeData()->urls())
+        if (url.isLocalFile()) paths << url.toLocalFile();
+    if (paths.isEmpty()) return;
+    event->acceptProposedAction();
+    // After the drop has finished, so the dialogs that follow don't hold up the program it came from.
+    QTimer::singleShot(0, this, [this, paths] { send_paths(paths); });
 }
 
 // What can be done with an attachment, depending on where it stands. Nothing is ever fetched or opened without being asked.
 void ChatWidget::show_attachment(const QString& file_id) {
     auto a = engine_->attachment(file_id.toStdString());
     if (!a) return;
-    QString text = qstr(a->name) + "\n" + human_size(a->size) + "\n\n" + attachment_state_text(*engine_, *a);
-    if (a->state == HistoryStore::AttachAvailable && !a->outgoing)
+    QString text = a->pack ? pack_title(a->name) + "\nFiles sent together, " + human_size(a->size) + "\n\n" + attachment_state_text(*engine_, *a)
+                           : qstr(a->name) + "\n" + human_size(a->size) + "\n\n" + attachment_state_text(*engine_, *a);
+    if (a->state == HistoryStore::AttachAvailable && !a->outgoing && !a->pack)
         text += "\n\nIt is kept on the sender's relay, encrypted. Downloading uses it up for you: it is saved to the folder you choose, under a name that can't replace anything, "
                 "after it has been checked against what the sender signed. It is never opened for you.";
+    if (a->state == HistoryStore::AttachAvailable && !a->outgoing && a->pack)
+        text += "\n\nThey are kept on the sender's relay, encrypted, as one file. Downloading uses it up for you: once it has been checked against what the sender signed, "
+                "the files are unpacked into a new folder called \"" + pack_title(a->name) + "\" in the folder you choose, keeping their layout. Nothing is replaced, and "
+                "nothing is opened for you.";
     QMessageBox box(QMessageBox::Information, "Attachment", text, QMessageBox::NoButton, this);
     plain_box(box);
     QAbstractButton* download = nullptr;
     QAbstractButton* copy = nullptr;
     QAbstractButton* withdraw = nullptr;
     if (!a->outgoing && a->state == HistoryStore::AttachAvailable) download = box.addButton("Download…", QMessageBox::AcceptRole);
-    if (!a->outgoing && a->state == HistoryStore::AttachTransferred && !a->saved_path.empty()) copy = box.addButton("Copy the file's location", QMessageBox::AcceptRole);
+    if (!a->outgoing && a->state == HistoryStore::AttachTransferred && !a->saved_path.empty() && a->note != "Unpacking")
+        copy = box.addButton(a->pack && a->note.empty() ? "Copy the folder's location" : "Copy the file's location", QMessageBox::AcceptRole);
     if (a->outgoing && (a->state == HistoryStore::AttachAvailable || a->state == HistoryStore::AttachUploading)) withdraw = box.addButton("Withdraw it", QMessageBox::DestructiveRole);
     box.addButton("Close", QMessageBox::RejectRole);
     box.exec();
     QAbstractButton* clicked = box.clickedButton();
     if (download && clicked == download) {
         const QString start = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
-        const QString folder = QFileDialog::getExistingDirectory(this, "Save " + qstr(a->name) + " (" + human_size(a->size) + ") to", start);
+        const QString folder = QFileDialog::getExistingDirectory(this, "Save " + (a->pack ? pack_title(a->name) : qstr(a->name)) + " (" + human_size(a->size) + ") to", start);
         if (folder.isEmpty()) return;
         std::string error;
         if (!engine_->download_attachment(file_id.toStdString(), std::filesystem::u8path(folder.toStdString()), error)) QMessageBox::warning(this, "Download", qstr(error));

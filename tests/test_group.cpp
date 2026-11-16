@@ -2,6 +2,7 @@
 // people. POSIX only. Usage: test_group /path/to/pq-server
 #include "crypto_engine.h"
 #include "envelope.h"
+#include "file_pack.h"
 #include "messaging_engine.h"
 #include "prekey_vault.h"
 #include "message_record.h"
@@ -1690,6 +1691,150 @@ int main(int argc, char** argv) {
         auto came_back = view_in_group(carol, files_group, "minutes.pdf");
         CHECK(came_back && came_back->state == HistoryStore::AttachUnavailable && came_back->size == group_file.size() && came_back->caption == "this week's minutes", "the file she had downloaded is in the restored chat, with its name, size and caption, but marked as not fetchable");
         CHECK(!carol.engine->download_attachment(came_back->file_id, work / "carol-downloads", err), "and can't be downloaded: " + err);
+
+        // --- Files sent together (bulk transfers) ---
+        std::cout << "19b. Files sent together\n";
+        {
+            auto put = [&](const fs::path& p, const Bytes& data) { fs::create_directories(p.parent_path()); write_file(p, data); };
+            auto text = [](const std::string& t) { return Bytes(t.begin(), t.end()); };
+            // Everything under a folder: relative path -> contents ("<dir>" for folders).
+            auto tree = [&](const fs::path& dir) {
+                std::map<std::string, Bytes> out;
+                for (auto it = fs::recursive_directory_iterator(dir); it != fs::recursive_directory_iterator(); ++it)
+                    out[fs::relative(it->path(), dir).string()] = it->is_directory() ? text("<dir>") : read_file(it->path());
+                return out;
+            };
+            auto entries_in = [](const fs::path& dir) {
+                size_t n = 0;
+                std::error_code ec;
+                for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) n++;
+                return n;
+            };
+            auto pack_in_chat = [&](User& u, const std::string& other_fp, const std::string& prefix) -> std::optional<MessagingEngine::AttachmentView> {
+                for (auto& m : u.engine->messages(other_fp))
+                    if (m.is_attachment && m.attachment.pack && m.attachment.name.rfind(prefix, 0) == 0) return m.attachment;
+                return std::nullopt;
+            };
+            const fs::path alice_outgoing = alice.home / "outgoing";
+
+            // A folder, one to one.
+            const fs::path trip = work / "src" / "Trip";
+            put(trip / "day1" / "a.jpg", CryptoEngine::random_bytes(200 * 1024 + 3));
+            put(trip / "day1" / "b.jpg", CryptoEngine::random_bytes(90 * 1024));
+            put(trip / "day2" / "notes.txt", text("we walked a lot"));
+            put(trip / "readme.txt", text("hello"));
+            fs::create_directories(trip / "empty");
+            fs::create_symlink(work / "src" / "later.txt", trip / "a-link");  // left out, not followed
+            CHECK(alice.engine->send_files(bob.fp, {trip}, "the trip", 7, err), "Alice sends Bob a folder (" + err + ")");
+            CHECK(wait_for([&] { return alice.engine->packing().empty() && view_in_chat(alice, bob.fp, "Trip.lattice.tar").has_value(); }, 60000),
+                  "it is packed in the background, then appears in her chat");
+            auto mine = view_in_chat(alice, bob.fp, "Trip.lattice.tar");
+            CHECK(mine && mine->pack && mine->outgoing && mine->caption == "the trip", "as files sent together, with the caption");
+            CHECK(wait_for([&] { return state_is(view_in_chat(bob, alice.fp, "Trip.lattice.tar"), HistoryStore::AttachAvailable); }, 90000), "it reaches Bob");
+            auto theirs = view_in_chat(bob, alice.fp, "Trip.lattice.tar");
+            CHECK(theirs && theirs->pack && !theirs->outgoing, "and his app knows they are files sent together");
+            CHECK(wait_for([&] { return entries_in(alice_outgoing) == 0; }, 30000), "once it is uploaded, Alice's packed copy is deleted");
+            const fs::path dl = work / "bob-packs";
+            fs::create_directories(dl);
+            CHECK(bob.engine->download_attachment(theirs->file_id, dl, err) &&
+                      wait_for([&] { auto v = view_in_chat(bob, alice.fp, "Trip.lattice.tar"); return v && v->state == HistoryStore::AttachTransferred && v->note.empty(); }, 90000),
+                  "Bob downloads it, and it is checked and unpacked (" + err + ")");
+            auto got = view_in_chat(bob, alice.fp, "Trip.lattice.tar");
+            fs::remove(trip / "a-link");
+            CHECK(got && fs::path(got->saved_path) == dl / "Trip" && tree(dl / "Trip") == tree(trip), "every file and folder arrives, with its layout, in a folder called Trip");
+            CHECK(entries_in(dl) == 1, "the archive itself is gone, and nothing else was left there");
+
+            // Several files: they go together, in a folder named for the day.
+            put(work / "src" / "list.txt", text("milk"));
+            put(work / "src" / "deep" / "list.txt", text("eggs"));
+            CHECK(alice.engine->send_files(bob.fp, {work / "src" / "list.txt", work / "src" / "deep" / "list.txt", work / "src" / "alpha.bin"}, "", 7, err),
+                  "Alice sends three files at once, two with the same name (" + err + ")");
+            CHECK(wait_for([&] { return state_is(pack_in_chat(bob, alice.fp, "Files "), HistoryStore::AttachAvailable); }, 90000), "they reach Bob as one");
+            auto several = pack_in_chat(bob, alice.fp, "Files ");
+            CHECK(several && bob.engine->download_attachment(several->file_id, dl, err) &&
+                      wait_for([&] { auto v = pack_in_chat(bob, alice.fp, "Files "); return v && v->state == HistoryStore::AttachTransferred && v->note.empty(); }, 90000),
+                  "Bob downloads them");
+            const fs::path files_dir = several ? fs::path(pack_in_chat(bob, alice.fp, "Files ")->saved_path) : fs::path();
+            CHECK(several && read_file(files_dir / "list.txt") == text("milk") && read_file(files_dir / "list (2).txt") == text("eggs") && read_file(files_dir / "alpha.bin") == fa,
+                  "all three are there; the second list.txt became \"list (2).txt\"");
+
+            // One file is just an attachment.
+            put(work / "src" / "single.txt", text("just me"));
+            CHECK(alice.engine->send_files(bob.fp, {work / "src" / "single.txt"}, "", 7, err) && alice.engine->packing().empty(), "one file is sent at once, without packing");
+            auto single = view_in_chat(alice, bob.fp, "single.txt");
+            CHECK(single && !single->pack, "as an ordinary attachment");
+
+            // A group.
+            const fs::path minutes = work / "src" / "Minutes";
+            put(minutes / "jan.txt", text("january"));
+            put(minutes / "feb" / "feb.txt", text("february"));
+            CHECK(alice.engine->send_group_files(files_group, {minutes}, "", 7, err), "Alice sends the group a folder (" + err + ")");
+            CHECK(wait_for([&] { return state_is(view_in_group(bob, files_group, "Minutes.lattice.tar"), HistoryStore::AttachAvailable); }, 90000), "it reaches Bob in the group");
+            auto in_group = view_in_group(bob, files_group, "Minutes.lattice.tar");
+            CHECK(in_group && bob.engine->download_attachment(in_group->file_id, dl, err) &&
+                      wait_for([&] { auto v = view_in_group(bob, files_group, "Minutes.lattice.tar"); return v && v->state == HistoryStore::AttachTransferred && v->note.empty(); }, 90000) &&
+                      tree(dl / "Minutes") == tree(minutes),
+                  "and he unpacks the same folder");
+
+            // Cancelling: nothing is sent and nothing is left.
+            const fs::path big_folder = work / "src" / "Big";
+            fs::create_directories(big_folder);
+            std::ofstream(big_folder / "large.bin").close();
+            fs::resize_file(big_folder / "large.bin", 3ull * 1024 * 1024 * 1024);  // sparse: takes no space, but takes a while to pack
+            const size_t messages_before = alice.engine->messages(bob.fp).size();
+            CHECK(alice.engine->send_files(bob.fp, {big_folder}, "", 7, err) && !alice.engine->packing().empty(), "Alice starts sending a 3 GiB folder");
+            std::vector<std::string> cancelled_ids;  // at once, so it is still being packed (3 GiB takes a moment even on a fast disk)
+            for (const auto& j : alice.engine->packing()) {
+                cancelled_ids.push_back(j.id);
+                alice.engine->cancel_packing(j.id);
+            }
+            CHECK(cancelled_ids.size() == 1 && wait_for([&] { return alice.engine->packing().empty(); }, 30000), "and cancels it while it is being packed");
+            // The packing thread removes what it had written at once; anything else in the folder goes at the next periodic cleanup.
+            CHECK(!cancelled_ids.empty() && wait_for([&] { return !fs::exists(alice_outgoing / cancelled_ids[0]); }, 5000), "what was packed so far is deleted straight away");
+            run_for(1000);
+            CHECK(alice.engine->messages(bob.fp).size() == messages_before, "nothing is sent");
+            auto listing = [&] {
+                std::string names;
+                std::error_code ec;
+                for (fs::directory_iterator it(alice_outgoing, ec), end; !ec && it != end; it.increment(ec)) names += " " + it->path().filename().string();
+                return names;
+            };
+            CHECK(wait_for([&] { return entries_in(alice_outgoing) == 0; }, 90000), "and her outgoing folder is empty after the next cleanup (left:" + listing() + ")");
+
+            // Refused before any packing.
+            CHECK(!alice.engine->send_files(bob.fp, {}, "", 7, err), "nothing chosen: refused");
+            fs::create_directories(work / "src" / "Hollow" / "inner");
+            CHECK(!alice.engine->send_files(bob.fp, {work / "src" / "Hollow"}, "", 7, err) && has(err, "no files"), "only empty folders: refused: " + err);
+            fs::resize_file(big_folder / "large.bin", 5ull * 1024 * 1024 * 1024);
+            CHECK(!alice.engine->send_files(bob.fp, {big_folder}, "", 7, err) && alice.engine->packing().empty(), "more than 5 GiB: refused at once: " + err);
+            CHECK(!alice.engine->send_files(bob.fp, {trip}, "", 0, err), "a keep-time of 0 days: refused");
+            fs::remove_all(big_folder);
+
+            // A hostile sender: a pack that tries to write outside its folder is refused, and kept packed.
+            Bytes evil;
+            auto entry = [&](const std::string& path, bool dir, const std::string& data) {
+                const Bytes h = file_pack::detail::entry_header(path, dir, data.size(), 1700000000);
+                evil.insert(evil.end(), h.begin(), h.end());
+                evil.insert(evil.end(), data.begin(), data.end());
+                evil.insert(evil.end(), static_cast<size_t>(file_pack::detail::padding(data.size())), 0);
+            };
+            entry("Evil", true, "");
+            entry("Evil/fine.txt", false, "fine");
+            entry("Evil/../escaped.txt", false, "escaped");
+            const Bytes end_blocks = file_pack::detail::end_of_archive();
+            evil.insert(evil.end(), end_blocks.begin(), end_blocks.end());
+            put(work / "src" / "evil" / "Evil.lattice.tar", evil);
+            CHECK(alice.engine->send_attachment(bob.fp, work / "src" / "evil" / "Evil.lattice.tar", "", 7, err), "(a sender crafts a pack with a path that climbs out)");
+            CHECK(wait_for([&] { return state_is(view_in_chat(bob, alice.fp, "Evil.lattice.tar"), HistoryStore::AttachAvailable); }, 90000), "(it reaches Bob)");
+            const fs::path evil_dl = work / "bob-evil" / "inside";
+            fs::create_directories(evil_dl);
+            auto evil_view = view_in_chat(bob, alice.fp, "Evil.lattice.tar");
+            CHECK(evil_view && bob.engine->download_attachment(evil_view->file_id, evil_dl, err) &&
+                      wait_for([&] { auto v = view_in_chat(bob, alice.fp, "Evil.lattice.tar"); return v && v->state == HistoryStore::AttachTransferred && has(v->note, "still packed"); }, 90000),
+                  "Bob's app downloads it but refuses to unpack it, and says so: " + (view_in_chat(bob, alice.fp, "Evil.lattice.tar") ? view_in_chat(bob, alice.fp, "Evil.lattice.tar")->note : std::string()));
+            CHECK(!fs::exists(evil_dl.parent_path() / "escaped.txt") && !fs::exists(evil_dl / "Evil") && entries_in(evil_dl) == 1 && fs::exists(evil_dl / "Evil.lattice.tar"),
+                  "nothing was written, inside or outside: only the archive is there");
+        }
 
         // --- Limits ---
         CHECK(!alice.engine->send_attachment(bob.fp, work / "no-such-file", "", 7, err) && has(err, "isn't a file"), "a file that isn't there is refused: " + err);

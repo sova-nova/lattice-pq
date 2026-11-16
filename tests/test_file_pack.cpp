@@ -2,6 +2,7 @@
 // with the system's tar, the sending side's rules (links, names, limits, files that change), and hostile archives,
 // each of which must be refused without leaving anything behind.
 #include "file_pack.h"
+#include "attachment.h"
 
 #include <cstdlib>
 #include <fstream>
@@ -169,6 +170,15 @@ int main() {
     CHECK(fs::file_size(pack) == plan->archive_bytes, "its size is exactly what the plan said");
     CHECK(last_progress == plan->archive_bytes, "progress reaches the end");
     CHECK(file_pack::is_pack_name(pack.filename().u8string()), "its name is recognised as a pack");
+    {
+        // The SHA-256 worked out while writing is the one the file really has (the app signs it without reading the pack again).
+        Bytes while_writing;
+        const fs::path again = out_dir / "hashed.lattice.tar";
+        CHECK(file_pack::write(*plan, again, nullptr, error, &while_writing), "written again, hashing as it goes");
+        auto fp = attachment::fingerprint_file(again, error);
+        CHECK(fp && fp->sha256 == while_writing && fp->size == plan->archive_bytes, "the SHA-256 from writing matches the file's own");
+        fs::remove(again);
+    }
     CHECK(!file_pack::is_pack_name("Photos.tar") && !file_pack::is_pack_name(".lattice.tar"), "other names are not");
 
     const fs::path dest = fresh_dir("dest");

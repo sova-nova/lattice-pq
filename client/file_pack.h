@@ -65,8 +65,9 @@ std::optional<Plan> plan_folder(const fs::path& folder, std::string& error);
 std::optional<Plan> plan_items(const std::string& root_name, const std::vector<fs::path>& sources, std::string& error);
 
 // Writes the archive to `out` (replacing it). Fails if a file can't be read or changed size since it was planned,
-// if there isn't room for it, or if `progress` cancels; nothing is left behind then.
-bool write(const Plan& plan, const fs::path& out, const Progress& progress, std::string& error);
+// if there isn't room for it, or if `progress` cancels; nothing is left behind then. With `sha256`, also gives the
+// SHA-256 of everything written, so the archive needn't be read again to fingerprint it.
+bool write(const Plan& plan, const fs::path& out, const Progress& progress, std::string& error, Bytes* sha256 = nullptr);
 
 // --- Receiving ---
 

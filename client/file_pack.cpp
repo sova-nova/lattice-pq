@@ -431,7 +431,7 @@ std::optional<Plan> plan_items(const std::string& root_name, const std::vector<f
     return std::move(planner.plan);
 }
 
-bool write(const Plan& plan, const fs::path& out, const Progress& progress, std::string& error) {
+bool write(const Plan& plan, const fs::path& out, const Progress& progress, std::string& error, Bytes* sha256) {
     std::error_code ec;
     const fs::path dir = out.has_parent_path() ? out.parent_path() : fs::path(".");
     const auto space = fs::space(dir, ec);
@@ -451,8 +451,10 @@ bool write(const Plan& plan, const fs::path& out, const Progress& progress, std:
         fs::remove(out, rm);
     });
     uint64_t written = 0;
+    attachment::Sha256 hash;
     auto put = [&](const uint8_t* p, size_t n) {
         o.write(reinterpret_cast<const char*>(p), static_cast<std::streamsize>(n));
+        if (sha256) hash.update(p, n);
         written += n;
         return static_cast<bool>(o);
     };
@@ -500,6 +502,7 @@ bool write(const Plan& plan, const fs::path& out, const Progress& progress, std:
         return false;
     }
     if (progress) progress(written, plan.archive_bytes);
+    if (sha256) *sha256 = hash.finish();
     remove_partial.dismiss();
     return true;
 }

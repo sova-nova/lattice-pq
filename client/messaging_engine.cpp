@@ -93,6 +93,17 @@ MessagingEngine::MessagingEngine(KeyStore& keys, const fs::path& history_path, c
     next_deletion_check_ = std::chrono::steady_clock::now() + std::chrono::seconds(std::max(1, options_.archive_sync_seconds));
     next_attachment_check_ = std::chrono::steady_clock::now() + std::chrono::seconds(std::max(1, options_.attachment_status_fast_seconds));
     history_->reset_downloading();  // nothing is being fetched after a restart
+    // A pack being unpacked when the app last stopped: its files are still packed, where it was saved.
+    for (const auto& a : history_->attachments_in_state(HistoryStore::AttachTransferred))
+        if (!a.outgoing && a.note == "Unpacking")
+            history_->set_attachment_state(a.file_id, HistoryStore::AttachTransferred,
+                                           "Unpacking was interrupted. The files are still packed, in " + a.path + " (any archive tool opens it)");
+    // Files sent together are packed here first. Whatever a previous run left that is no longer needed goes now.
+    {
+        std::error_code ec;
+        outgoing_dir_ = fs::absolute(history_path.parent_path() / "outgoing", ec);
+        clean_outgoing();
+    }
 
     my_fp_hex_ = keys_.own_fingerprint();
     auto fp = hex_to_bytes(my_fp_hex_);
@@ -101,6 +112,7 @@ MessagingEngine::MessagingEngine(KeyStore& keys, const fs::path& history_path, c
 }
 
 MessagingEngine::~MessagingEngine() {
+    stop_packing();
     stop_transfers();
     CryptoEngine::secure_wipe(kem_private_);
     CryptoEngine::secure_wipe(dsa_private_);
@@ -2769,6 +2781,7 @@ MessagingEngine::AttachmentView MessagingEngine::attachment_view(const chat::Att
         v.saved_path = a->outgoing ? std::string() : a->path;
         v.note = a->note;
     }
+    v.pack = file_pack::is_pack_name(v.name);
     // The relay's time may have run out since this was last looked at.
     if ((v.state == HistoryStore::AttachAvailable || v.state == HistoryStore::AttachUploading) && unix_now() >= static_cast<int64_t>(info.expires_at)) v.state = HistoryStore::AttachExpired;
     return v;
@@ -2824,7 +2837,8 @@ void MessagingEngine::note_incoming_attachment(const chat::SignedRecord& sr, con
 }
 
 bool MessagingEngine::start_attachment_send(const Bytes& conversation_id, const std::vector<std::string>& recipients, const Bytes& recipients_hash,
-                                            const std::vector<Bytes>& seen, const std::filesystem::path& file, const std::string& caption, int days, std::string& error) {
+                                            const std::vector<Bytes>& seen, const std::filesystem::path& file, const std::string& caption, int days, std::string& error,
+                                            const attachment::Fingerprint* known) {
     namespace fs = std::filesystem;
     std::error_code ec;
     if (!fs::is_regular_file(file, ec)) { error = "That isn't a file"; return false; }
@@ -2838,7 +2852,9 @@ bool MessagingEngine::start_attachment_send(const Bytes& conversation_id, const 
     if (recipients.empty() || recipients.size() > relay::MAX_FILE_TOKENS) { error = "There is no one to send it to"; return false; }
     auto config = keys_.load_mailbox_config();
     if (!config) { error = "Set up messaging first"; return false; }
-    auto fingerprint = attachment::fingerprint_file(file, error);  // reads the file once; the upload reads it again
+    std::optional<attachment::Fingerprint> fingerprint;
+    if (known && known->size == size) fingerprint = *known;
+    else fingerprint = attachment::fingerprint_file(file, error);  // reads the file once; the upload reads it again
     if (!fingerprint) return false;
 
     const int64_t now = unix_now();
@@ -2910,6 +2926,11 @@ bool MessagingEngine::start_attachment_send(const Bytes& conversation_id, const 
 }
 
 bool MessagingEngine::send_attachment(const std::string& contact_fp, const std::filesystem::path& file, const std::string& caption, int days, std::string& error) {
+    return send_attachment_to(contact_fp, file, caption, days, error, nullptr);
+}
+
+bool MessagingEngine::send_attachment_to(const std::string& contact_fp, const std::filesystem::path& file, const std::string& caption, int days, std::string& error,
+                                         const attachment::Fingerprint* known) {
     auto contact = keys_.find_contact_by_fingerprint(contact_fp);
     if (!contact) { error = "That contact isn't in your list"; return false; }
     if (!contact->kem_verified) { error = "Their encryption key isn't verified. Ask them for a new contact card."; return false; }
@@ -2919,10 +2940,15 @@ bool MessagingEngine::send_attachment(const std::string& contact_fp, const std::
     auto conv = history_->ensure_conversation(chat::conversation_id_for(my_fp_, *their_fp), contact_fp, unix_now());
     std::vector<Bytes> seen;
     if (auto last_received = history_->last_entry_hash(conv.id, false)) seen.push_back(*last_received);
-    return start_attachment_send(conv.id, {contact_fp}, chat::recipients_hash_for({my_fp_, *their_fp}), seen, file, caption, days, error);
+    return start_attachment_send(conv.id, {contact_fp}, chat::recipients_hash_for({my_fp_, *their_fp}), seen, file, caption, days, error, known);
 }
 
 bool MessagingEngine::send_group_attachment(const std::string& group_id, const std::filesystem::path& file, const std::string& caption, int days, std::string& error) {
+    return send_group_attachment_to(group_id, file, caption, days, error, nullptr);
+}
+
+bool MessagingEngine::send_group_attachment_to(const std::string& group_id, const std::filesystem::path& file, const std::string& caption, int days, std::string& error,
+                                               const attachment::Fingerprint* known) {
     auto id = hex_to_bytes(group_id);
     auto conv = id ? history_->conversation(*id) : std::nullopt;
     if (!conv || conv->kind != HistoryStore::Group) { error = "That group isn't in your list"; return false; }
@@ -2932,7 +2958,7 @@ bool MessagingEngine::send_group_attachment(const std::string& group_id, const s
         if (!raw) { error = "That group is damaged"; return false; }
         everyone.push_back(std::move(*raw));
     }
-    return start_attachment_send(conv->id, conv->members, chat::recipients_hash_for(everyone), latest_heads(conv->id, conv->members), file, caption, days, error);
+    return start_attachment_send(conv->id, conv->members, chat::recipients_hash_for(everyone), latest_heads(conv->id, conv->members), file, caption, days, error, known);
 }
 
 // --- Transfers: one background thread for uploads and downloads, so a big file never holds up messages ---
@@ -3086,6 +3112,7 @@ std::optional<MessagingEngine::AttachmentView> MessagingEngine::attachment(const
     v.redeemed = a->redeemed;
     v.saved_path = a->outgoing ? std::string() : a->path;
     v.note = a->note;
+    v.pack = file_pack::is_pack_name(v.name);
     if ((v.state == HistoryStore::AttachAvailable || v.state == HistoryStore::AttachUploading) && unix_now() >= a->expires_at) v.state = HistoryStore::AttachExpired;
     return v;
 }
@@ -3181,8 +3208,210 @@ void MessagingEngine::run_download(const TransferJob& job) {
         if (again.connect(address->host, address->port, a->relay_id, options_.connect_timeout_seconds, e)) again.redeem_file(a->file_id, a->token, e);
     }
     history_->set_attachment_path(job.file_id, saved.string());
+    if (!file_pack::is_pack_name(a->name)) {
+        history_->set_attachment_state(job.file_id, HistoryStore::AttachTransferred, std::string());
+        notify("Saved " + a->name + " to " + saved.string());
+        return;
+    }
+
+    // Files sent together: checked as a whole above, now unpacked into a folder of their own next to the archive, which then goes.
+    // It counts as fetched from here on (the token is used); if unpacking stops part-way, the archive is still there.
+    history_->set_attachment_state(job.file_id, HistoryStore::AttachTransferred, "Unpacking");
+    bump();
+    std::string why;
+    auto unpacked = file_pack::unpack(saved, job.directory, [&](uint64_t done, uint64_t total) {
+        std::lock_guard<std::mutex> lock(xfer_mutex_);
+        xfer_progress_[key] = {done, total};
+        return !xfer_cancel_;
+    }, why);
+    if (!unpacked) {
+        const std::string what = xfer_cancel_ ? std::string("Unpacking was interrupted.") : why;
+        history_->set_attachment_state(job.file_id, HistoryStore::AttachTransferred,
+                                       what + " The files are still packed, in " + saved.string() + " (any archive tool opens it)");
+        notify("The files in " + a->name + " were downloaded but not unpacked: " + what);
+        return;
+    }
+    std::error_code ec;
+    fs::remove(saved, ec);
+    history_->set_attachment_path(job.file_id, unpacked->saved.string());
     history_->set_attachment_state(job.file_id, HistoryStore::AttachTransferred, std::string());
-    notify("Saved " + a->name + " to " + saved.string());
+    notify("Saved " + std::to_string(unpacked->files) + (unpacked->files == 1 ? " file" : " files") + " to " + unpacked->saved.string());
+}
+
+// --- Files sent together (bulk transfers) ---
+
+bool MessagingEngine::send_files(const std::string& contact_fp, const std::vector<fs::path>& sources, const std::string& caption, int days, std::string& error) {
+    return queue_pack(contact_fp, false, sources, caption, days, error);
+}
+
+bool MessagingEngine::send_group_files(const std::string& group_id, const std::vector<fs::path>& sources, const std::string& caption, int days, std::string& error) {
+    return queue_pack(group_id, true, sources, caption, days, error);
+}
+
+bool MessagingEngine::queue_pack(const std::string& conversation, bool group, const std::vector<fs::path>& sources, const std::string& caption, int days,
+                                 std::string& error) {
+    std::error_code ec;
+    if (sources.empty()) { error = "Nothing was chosen to send"; return false; }
+    // One plain file is an ordinary attachment.
+    if (sources.size() == 1 && fs::is_regular_file(sources[0], ec))
+        return group ? send_group_attachment(conversation, sources[0], caption, days, error) : send_attachment(conversation, sources[0], caption, days, error);
+
+    // Everything that would stop the attachment later is checked now, before any packing.
+    if (days < 1 || days > 30) { error = "Choose how long to keep it: 1 to 30 days"; return false; }
+    if (!keys_.load_mailbox_config()) { error = "Set up messaging first"; return false; }
+    if (group) {
+        auto id = hex_to_bytes(conversation);
+        auto conv = id ? history_->conversation(*id) : std::nullopt;
+        if (!conv || conv->kind != HistoryStore::Group) { error = "That group isn't in your list"; return false; }
+    } else {
+        auto contact = keys_.find_contact_by_fingerprint(conversation);
+        if (!contact) { error = "That contact isn't in your list"; return false; }
+        if (!contact->kem_verified) { error = "Their encryption key isn't verified. Ask them for a new contact card."; return false; }
+        if (!contact->can_message()) { error = "You don't have their messaging address yet. Ask them for a new contact card."; return false; }
+    }
+    std::optional<file_pack::Plan> plan;
+    if (sources.size() == 1 && fs::is_directory(sources[0], ec)) {
+        plan = file_pack::plan_folder(sources[0], error);
+    } else {
+        // "Files 2026-11-16", in local time.
+        const std::time_t t = static_cast<std::time_t>(unix_now());
+        std::tm local{};
+#ifdef _WIN32
+        localtime_s(&local, &t);
+#else
+        localtime_r(&t, &local);
+#endif
+        char date[16];
+        std::strftime(date, sizeof(date), "%Y-%m-%d", &local);
+        plan = file_pack::plan_items(std::string("Files ") + date, sources, error);
+    }
+    if (!plan) return false;
+    if (plan->archive_bytes > options_.max_attachment_bytes || plan->archive_bytes > attachment::MAX_PLAINTEXT_BYTES) {
+        error = "That's too much to send at once (" + std::to_string(std::min<uint64_t>(options_.max_attachment_bytes, attachment::MAX_PLAINTEXT_BYTES) / (1024 * 1024)) +
+                " MiB at most)";
+        return false;
+    }
+    if (plan->files == 0) { error = "There are no files in what you chose (empty folders, or only links)"; return false; }
+    if (!plan->skipped.empty())
+        notify(std::to_string(plan->skipped.size()) + " link(s) or special file(s) were left out of " + plan->root + ": only files and folders are sent");
+
+    auto job = std::make_shared<PackJob>();
+    job->id = bytes_to_hex(CryptoEngine::random_bytes(8));
+    job->conversation = conversation;
+    job->group = group;
+    job->caption = caption;
+    job->days = days;
+    job->plan = std::move(*plan);
+    job->dir = outgoing_dir_ / job->id;
+    {
+        std::lock_guard<std::mutex> lock(pack_mutex_);
+        pack_jobs_.push_back(job);
+        if (!pack_thread_.joinable()) pack_thread_ = std::thread([this] { pack_loop(); });
+    }
+    pack_cv_.notify_one();
+    bump();
+    return true;
+}
+
+void MessagingEngine::pack_loop() {
+    while (true) {
+        std::shared_ptr<PackJob> job;
+        {
+            std::unique_lock<std::mutex> lock(pack_mutex_);
+            pack_cv_.wait(lock, [&] { return pack_stop_ || !pack_jobs_.empty(); });
+            if (pack_stop_) return;
+            job = pack_jobs_.front();  // stays in the list (so its folder is kept) until it is sent or given up
+        }
+        std::error_code ec;
+        const fs::path pack = job->dir / job->plan.file_name();
+        std::string err;
+        bool ok = !job->cancelled && fs::create_directories(job->dir, ec) && !ec;
+        if (!ok && !job->cancelled) err = "Couldn't create a folder for it in " + outgoing_dir_.string();
+        attachment::Fingerprint fingerprint;
+        if (ok) {
+            ok = file_pack::write(job->plan, pack, [&](uint64_t done, uint64_t) {
+                std::lock_guard<std::mutex> lock(pack_mutex_);
+                job->done = done;
+                return !job->cancelled && !pack_stop_;
+            }, err, &fingerprint.sha256);
+            fingerprint.size = job->plan.archive_bytes;
+        }
+        // Whether it goes is settled here, under the lock: cancelled now, it doesn't; past this point, cancelling can't stop it.
+        bool cancelled;
+        {
+            std::lock_guard<std::mutex> lock(pack_mutex_);
+            cancelled = job->cancelled || pack_stop_;
+            if (ok && !cancelled) job->sending = true;
+        }
+        if (ok && !cancelled) {
+            // Sent like any attachment (fingerprinted as it was written, so not read again): from here it is an upload, and the
+            // pack is kept until that is over.
+            ok = job->group ? send_group_attachment_to(job->conversation, pack, job->caption, job->days, err, &fingerprint)
+                            : send_attachment_to(job->conversation, pack, job->caption, job->days, err, &fingerprint);
+            if (!ok) notify(job->plan.root + " could not be sent: " + err);
+        } else if (!cancelled) {
+            notify(job->plan.root + " could not be packed: " + err);
+        }
+        {
+            std::lock_guard<std::mutex> lock(pack_mutex_);
+            if (!pack_jobs_.empty() && pack_jobs_.front() == job) pack_jobs_.pop_front();
+        }
+        if (!ok || cancelled) fs::remove_all(job->dir, ec);
+        bump();
+    }
+}
+
+std::vector<MessagingEngine::Packing> MessagingEngine::packing() {
+    std::lock_guard<std::mutex> lock(pack_mutex_);
+    std::vector<Packing> out;
+    for (const auto& j : pack_jobs_) {
+        if (j->cancelled) continue;
+        out.push_back(Packing{j->id, j->conversation, j->group, j->plan.root, j->plan.files, j->done, j->plan.archive_bytes});
+    }
+    return out;
+}
+
+void MessagingEngine::cancel_packing(const std::string& id) {
+    {
+        std::lock_guard<std::mutex> lock(pack_mutex_);
+        for (auto it = pack_jobs_.begin(); it != pack_jobs_.end(); ++it) {
+            if ((*it)->id != id) continue;
+            if ((*it)->sending) break;  // too late: it is being sent
+            (*it)->cancelled = true;
+            // One that hasn't started is simply dropped; the one being packed stops at its next step.
+            if (it != pack_jobs_.begin()) pack_jobs_.erase(it);
+            break;
+        }
+    }
+    bump();
+}
+
+void MessagingEngine::stop_packing() {
+    {
+        std::lock_guard<std::mutex> lock(pack_mutex_);
+        pack_stop_ = true;
+    }
+    pack_cv_.notify_all();
+    if (pack_thread_.joinable()) pack_thread_.join();
+}
+
+// Deletes every pack in outgoing_dir_ that nothing needs any more: not being packed, and not an attachment still uploading. Both
+// are read under pack_mutex_, which the packing thread holds when it drops a finished job (after its attachment exists), so a
+// pack is always found in one or the other.
+void MessagingEngine::clean_outgoing() {
+    std::error_code ec;
+    if (outgoing_dir_.empty() || !fs::is_directory(outgoing_dir_, ec)) return;
+    std::set<fs::path> keep;
+    {
+        std::lock_guard<std::mutex> lock(pack_mutex_);
+        for (const auto& j : pack_jobs_) keep.insert(j->dir.lexically_normal());
+        for (const auto& a : history_->attachments_in_state(HistoryStore::AttachUploading))
+            if (a.outgoing) keep.insert(fs::path(a.path).parent_path().lexically_normal());
+    }
+    std::vector<fs::path> gone;
+    for (fs::directory_iterator it(outgoing_dir_, ec), end; !ec && it != end; it.increment(ec))
+        if (!keep.count(it->path().lexically_normal())) gone.push_back(it->path());
+    for (const auto& p : gone) fs::remove_all(p, ec);
 }
 
 bool MessagingEngine::withdraw_attachment(const std::string& file_id, std::string& error) {
@@ -3214,6 +3443,7 @@ bool MessagingEngine::withdraw_attachment(const std::string& file_id, std::strin
 void MessagingEngine::check_attachments() {
     const auto now = std::chrono::steady_clock::now();
     if (now < next_attachment_check_) return;
+    clean_outgoing();  // packs whose upload is over
     const int64_t wall = unix_now();
     bool recent = false, any_outgoing = false;
     bool tried = false, connected = false;

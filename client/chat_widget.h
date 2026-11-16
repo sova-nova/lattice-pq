@@ -74,13 +74,22 @@ public:
     // The user compared this contact's fingerprint with them (the add-contact dialog asked).
     void mark_verified(const std::string& fingerprint);
 
+protected:
+    // Files and folders dropped on the Chats tab are sent to the chat on screen (several at once go together, as one folder).
+    void dragEnterEvent(QDragEnterEvent* event) override;
+    void dropEvent(QDropEvent* event) override;
+
 private:
     void setup_messaging(const QString& preset_invite = QString());  // empty: ask for it
+    void attach_files();   // several files at once, sent together
+    void attach_folder();  // a folder and everything in it
+    void send_paths(const QStringList& paths);  // one file goes as it is; anything more is packed and sent together
+    bool can_attach() const;  // a Saved chat or group is on screen and files can be sent to it
+    void update_packing_row();
     void review_requests();
     void create_group_dialog();
     void make_relay_invite();
     void restore_history();
-    void attach_file();
     void render_privates();
     void render_conversations();
     void sync_conversation_selection();
@@ -125,6 +134,9 @@ private:
     QPushButton* relay_invite_button_ = nullptr;
     QPushButton* restore_button_ = nullptr;
     QPushButton* attach_button_ = nullptr;   // choose a file to send in the chat on screen
+    QWidget* packing_row_ = nullptr;         // "Packing Photos… 40%" and Cancel, while files for the chat on screen are being packed
+    QLabel* packing_label_ = nullptr;
+    QString packing_id_;                     // the job the row's Cancel button stops
     std::function<void(const QString&)> on_relay_chosen_;
     std::function<void()> on_add_contact_;
     std::function<void()> on_changed_;
