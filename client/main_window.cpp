@@ -32,6 +32,8 @@
 #include <QComboBox>
 #include <QDesktopServices>
 #include <QDir>
+#include <QDropEvent>
+#include <QMimeData>
 #include <QFile>
 #include <QFileDialog>
 #include <QGuiApplication>
@@ -227,9 +229,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     // --- The Files tab (UX step 4): two cards side by side, then what is happening, then the relay and Downloads. ---
     auto* cards = new QHBoxLayout();
-    auto* send_box = new QGroupBox("Send a file", files_page);
+    auto* send_box = new QGroupBox("Send files", files_page);
     auto* send_layout = new QVBoxLayout(send_box);
-    auto* send_text = plain_label("Encrypted so only the person you choose can open it. You'll get a link to give them.", send_box);
+    auto* send_text = plain_label("Encrypted so only the person you choose can open them. Several files, or a folder, go as one. You'll get a link "
+                                  "to give them. You can also drop files here.", send_box);
     send_text->setWordWrap(true);
     send_layout->addWidget(send_text);
     auto* recipient_layout = new QHBoxLayout();
@@ -246,11 +249,19 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     add_contact_button_->setToolTip("Swap contact cards with someone so you can send each other files and messages");
     send_layout->addWidget(add_contact_button_, 0, Qt::AlignLeft);
     send_layout->addStretch(1);
-    send_button_ = new QPushButton("Choose file and send…", send_box);
+    send_button_ = new QPushButton("Choose what to send…", send_box);
     send_button_->setProperty("role", "primary");
     set_button_icon(send_button_, "upload", QColor("#ffffff"));
     send_button_->setMinimumHeight(40);
     send_layout->addWidget(send_button_);
+    {
+        auto* send_menu = new QMenu(send_button_);
+        connect(send_menu->addAction("Files…"), &QAction::triggered, this, [this] { choose_and_send(false); });
+        connect(send_menu->addAction("A folder…"), &QAction::triggered, this, [this] { choose_and_send(true); });
+        send_button_->setMenu(send_menu);
+    }
+    files_page->setAcceptDrops(true);
+    files_page->installEventFilter(this);
     cards->addWidget(send_box, 1);
 
     auto* receive_box = new QGroupBox("Receive a file", files_page);
@@ -355,7 +366,6 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         QMetaObject::invokeMethod(this, [this, id]() { show_transfer_id(id); });
     };
 
-    connect(send_button_, &QPushButton::clicked, this, &MainWindow::start_send);
     connect(receive_button_, &QPushButton::clicked, this, &MainWindow::start_receive);
     connect(cancel_button_, &QPushButton::clicked, this, [this] {
         engine_.cancel();
@@ -860,7 +870,7 @@ void MainWindow::build_home() {
     };
     home_chats_button_ = big("chat", "Open chats", "Nothing new", true, &home_chats_text_);
     auto* add = big("user-plus", "Add contact", "Swap contact cards with someone", false, nullptr);
-    auto* send = big("upload", "Send a file", "Encrypted for one person", false, nullptr);
+    auto* send = big("upload", "Send files", "Encrypted for one person", false, nullptr);
     auto* receive = big("download", "Receive a file", "Paste the link you were sent", false, nullptr);
     connect(home_chats_button_, &QPushButton::clicked, this, [this] { tabs_->setCurrentWidget(chat_widget_); });
     connect(add, &QPushButton::clicked, this, [this] { add_contact(); });
@@ -1448,14 +1458,62 @@ void MainWindow::update_relay_label() {
     relay_label_->setText(server.isEmpty() ? QString("No relay set for files") : "Using relay " + server);
 }
 
-void MainWindow::start_send() {
-    if (busy_) return;
-
+bool MainWindow::send_ready() {
+    if (busy_) return false;
     auto server = configured_server(server_edit_);
     if (!server) {
-        QMessageBox::warning(this, "Send File", "Enter the relay server as host or host:port.");
-        return;
+        QMessageBox::warning(this, "Send files", "Enter the relay server as host or host:port.");
+        return false;
     }
+    const QString contact_name = recipient_combo_->currentData().toString();
+    std::optional<KeyStore::Contact> recipient =
+        contact_name.isEmpty() ? std::optional<KeyStore::Contact>(keystore_->self_contact())
+                               : keystore_->load_contact(contact_name.toStdString());
+    if (!recipient) {
+        QMessageBox::warning(this, "Send files", "The keys for " + contact_name + " are missing or invalid.");
+        return false;
+    }
+    return true;
+}
+
+void MainWindow::choose_and_send(bool folder) {
+    if (!send_ready()) return;
+    QStringList chosen;
+    if (folder) {
+        const QString dir = QFileDialog::getExistingDirectory(this, "Choose a folder to send");
+        if (!dir.isEmpty()) chosen << dir;
+    } else {
+        chosen = QFileDialog::getOpenFileNames(this, "Choose files to send (several go together, in one folder)");
+    }
+    if (!chosen.isEmpty()) send_paths(chosen);
+}
+
+bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
+    if (watched == files_page_ && (event->type() == QEvent::DragEnter || event->type() == QEvent::Drop)) {
+        auto* drop = static_cast<QDropEvent*>(event);
+        const QMimeData* data = drop->mimeData();
+        if (busy_ || !data || !data->hasUrls()) return false;
+        QStringList paths;
+        for (const QUrl& url : data->urls()) {
+            if (!url.isLocalFile()) return false;  // only files on this computer
+            paths << url.toLocalFile();
+        }
+        drop->acceptProposedAction();
+        if (event->type() == QEvent::Drop) {
+            // After the drop has finished, so the dialogs that follow don't hold up the program it came from.
+            QTimer::singleShot(0, this, [this, paths] {
+                if (send_ready()) send_paths(paths);
+            });
+        }
+        return true;
+    }
+    return QMainWindow::eventFilter(watched, event);
+}
+
+void MainWindow::send_paths(const QStringList& paths) {
+    if (busy_ || paths.isEmpty()) return;
+    auto server = configured_server(server_edit_);
+    if (!server) return;
     const std::string host = server->host;
     const uint16_t port = server->port;
 
@@ -1463,24 +1521,18 @@ void MainWindow::start_send() {
     std::optional<KeyStore::Contact> recipient =
         contact_name.isEmpty() ? std::optional<KeyStore::Contact>(keystore_->self_contact())
                                : keystore_->load_contact(contact_name.toStdString());
-    if (!recipient) {
-        QMessageBox::warning(this, "Send File", "The keys for " + contact_name + " are missing or invalid.");
-        return;
-    }
+    if (!recipient) return;
     if (!recipient->kem_verified) {
         QMessageBox warn(QMessageBox::Warning, "Encryption key not verified",
                          contact_name + "'s encryption key came from an older card or from key files, so nothing "
                          "proves it is really theirs. If it was altered on the way to you, whoever did it could "
-                         "read this file.\n\nAsk " + contact_name + " to update the app and send you a new "
+                         "read what you send.\n\nAsk " + contact_name + " to update the app and send you a new "
                          "contact card, then add it with +.\n\nSend anyway?",
                          QMessageBox::Yes | QMessageBox::No, this);
         warn.setTextFormat(Qt::PlainText);
         warn.setDefaultButton(QMessageBox::No);
         if (warn.exec() != QMessageBox::Yes) return;
     }
-
-    QString filepath = QFileDialog::getOpenFileName(this, "Select File to Send");
-    if (filepath.isEmpty()) return;
 
     save_server_setting();
     last_server_ = *server;
@@ -1491,11 +1543,14 @@ void MainWindow::start_send() {
     copy_link_button_->setEnabled(false);
     copy_id_button_->setEnabled(false);
 
+    std::vector<std::string> sources;
+    for (const QString& p : paths) sources.push_back(p.toStdString());
+    const std::string work_dir = (keystore_->app_dir() / "files-outgoing").u8string();
     const auto pin = trusted_relay_for(host, port);
     engine_.set_trusted_relay(pin);
-    run_in_background([this, path = filepath.toStdString(), host, port, contact = *recipient, pin] {
+    run_in_background([this, sources, host, port, contact = *recipient, pin, work_dir] {
         auto remember = make_scope_exit([&] { remember_relay(host, port, pin); });
-        engine_.upload_file(path, host, port, contact);
+        engine_.upload_files(sources, host, port, contact, work_dir);
     });
 }
 

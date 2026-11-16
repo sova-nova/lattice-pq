@@ -107,6 +107,29 @@ static Result recv(const std::string& user, const std::string& id) {
     return r;
 }
 
+// Several files or a folder, through upload_files. `cancel_at_pack` cancels as soon as packing reports progress.
+static Result send_many(const std::string& user, const std::vector<fs::path>& files, const KeyStore::Contact& to, bool cancel_at_pack = false) {
+    as(user); Result r; TransferEngine e;
+    if (auto* ks = session_of(user)) e.set_keystore(ks);
+    e.on_error = [&](const std::string& m) { r.error = m; };
+    e.on_transfer_id = [&](const std::string& id) { r.id = id; };
+    e.on_complete = [&](const std::string&) { r.ok = true; };
+    bool packing = false;
+    e.on_status = [&](const std::string& m) { packing = m.rfind("Packing", 0) == 0; };
+    e.on_progress = [&](double) { if (cancel_at_pack && packing) e.cancel(); };
+    std::vector<std::string> sources;
+    for (const auto& f : files) sources.push_back(f.u8string());
+    e.upload_files(sources, "127.0.0.1", static_cast<uint16_t>(PORT), to, (ROOT / user / "outgoing").u8string());
+    return r;
+}
+
+static size_t entries_in(const fs::path& dir) {
+    std::error_code ec;
+    size_t n = 0;
+    for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) n++;
+    return n;
+}
+
 static KeyStore::Contact contact_of(const std::string& user) { as(user); return KeyStore().self_contact(); }
 
 // Adds `user` to `owner`'s contacts the way the app does: through a signed v2 contact card.
@@ -377,6 +400,60 @@ int main(int argc, char** argv) {
     threw = false;
     try { KeyStore().initialize_keys(); } catch (...) { threw = true; }
     CHECK(threw, "a partial key set is not silently overwritten");
+
+    std::cout << "16. Files and folders sent together\n";
+    {
+        const fs::path src = ROOT / "together";
+        fs::create_directories(src / "Trip" / "day 1");
+        spit(src / "Trip" / "notes.txt", {'h', 'i'});
+        spit(src / "Trip" / "day 1" / "photo.bin", big);
+        spit(src / "one.txt", {'1'});
+        spit(src / "two.txt", {'2'});
+        fs::create_directories(ROOT / "bob" / "dl");
+        fs::remove_all(ROOT / "bob" / "dl");  // start empty, so what is there afterwards is only what this section made
+
+        auto up = send_many("alice", {src / "Trip"}, bob);
+        CHECK(up.ok && up.id.size() == 32, "a folder is packed and uploaded (" + up.error + ")");
+        CHECK(entries_in(ROOT / "alice" / "outgoing") == 0, "and the pack is deleted once it is uploaded");
+        auto got = recv("bob", up.id);
+        const fs::path trip = ROOT / "bob" / "dl" / "Trip";
+        CHECK(got.ok && fs::path(got.path) == trip, "Bob gets the folder back, unpacked (" + got.error + ")");
+        CHECK(slurp(trip / "notes.txt") == (std::vector<uint8_t>{'h', 'i'}) && slurp(trip / "day 1" / "photo.bin") == big,
+              "with every file, in its subfolder, byte for byte");
+        CHECK(entries_in(ROOT / "bob" / "dl") == 1, "and the archive is gone: only the folder is left");
+
+        auto up2 = send_many("alice", {src / "one.txt", src / "two.txt"}, bob);
+        auto got2 = recv("bob", up2.id);
+        const fs::path many = fs::path(got2.path);
+        CHECK(got2.ok && many.filename().u8string().rfind("Files 20", 0) == 0 && slurp(many / "one.txt") == std::vector<uint8_t>{'1'} &&
+                  slurp(many / "two.txt") == std::vector<uint8_t>{'2'},
+              "several files arrive together in one \"Files <date>\" folder: " + many.filename().u8string() + " " + got2.error);
+
+        auto up3 = send_many("alice", {src / "Trip"}, bob);
+        auto got3 = recv("bob", up3.id);
+        CHECK(got3.ok && fs::path(got3.path) != trip && fs::exists(fs::path(got3.path) / "notes.txt") && slurp(trip / "notes.txt") == (std::vector<uint8_t>{'h', 'i'}),
+              "the same folder again goes next to the first, which is left alone: " + fs::path(got3.path).filename().u8string());
+
+        auto up4 = send_many("alice", {src / "one.txt"}, bob);
+        auto got4 = recv("bob", up4.id);
+        CHECK(got4.ok && fs::path(got4.path).filename() == "one.txt", "one file chosen on its own is sent as itself");
+
+        auto cancelled = send_many("alice", {src / "Trip"}, bob, true);
+        CHECK(!cancelled.ok && cancelled.id.empty() && contains(cancelled.error, "cancelled"), "cancelling while it packs stops it before anything is uploaded: " + cancelled.error);
+        CHECK(entries_in(ROOT / "alice" / "outgoing") == 0, "and leaves no pack behind");
+
+        auto empty = send_many("alice", {}, bob);
+        CHECK(!empty.ok && !empty.error.empty(), "nothing chosen is refused: " + empty.error);
+        fs::create_directories(src / "Nothing" / "inside");
+        auto hollow = send_many("alice", {src / "Nothing"}, bob);
+        CHECK(!hollow.ok && contains(hollow.error, "no files"), "a folder with no files in it is refused: " + hollow.error);
+
+        // A trusted contact's app could still send a broken pack: it is saved, checked, and kept as it is.
+        const std::string junk_id = raw_upload_with_filename("alice", bob, "Junk.lattice.tar", std::vector<uint8_t>(3000, 'x'));
+        auto junk = recv("bob", junk_id);
+        CHECK(!junk.ok && contains(junk.error, "still packed") && fs::exists(ROOT / "bob" / "dl" / "Junk.lattice.tar") && !fs::exists(ROOT / "bob" / "dl" / "Junk"),
+              "a pack that can't be unpacked is kept as it came, and Bob is told where: " + junk.error);
+    }
 
     stop_server();
     std::error_code ec; fs::remove_all(ROOT, ec);

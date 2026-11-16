@@ -14,6 +14,7 @@
 // unpacked into a hidden folder that is renamed into place only once everything succeeded.
 
 #include <cstdint>
+#include <ctime>
 #include <filesystem>
 #include <functional>
 #include <iosfwd>
@@ -63,6 +64,9 @@ struct Plan {
 std::optional<Plan> plan_folder(const fs::path& folder, std::string& error);
 // Files and folders chosen together, each placed in a top folder called `root_name` (made safe first).
 std::optional<Plan> plan_items(const std::string& root_name, const std::vector<fs::path>& sources, std::string& error);
+// What the user chose, as the app sends it: one folder is sent as itself (plan_folder); anything else goes in a top folder
+// named "Files <date>", the date being `now` in local time (plan_items). Fails, too, if no file at all would be sent.
+std::optional<Plan> plan_sources(const std::vector<fs::path>& sources, std::time_t now, std::string& error);
 
 // Writes the archive to `out` (replacing it). Fails if a file can't be read or changed size since it was planned,
 // if there isn't room for it, or if `progress` cancels; nothing is left behind then. With `sha256`, also gives the

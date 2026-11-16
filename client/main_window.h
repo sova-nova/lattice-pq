@@ -36,6 +36,9 @@ public:
     explicit MainWindow(QWidget* parent = nullptr);
     ~MainWindow() override;
 
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override;  // files dropped on the Files tab are sent
+
 private:
     QLabel* status_label_ = nullptr;
     QLabel* fingerprint_label_ = nullptr;
@@ -65,7 +68,11 @@ private:
     QString current_share_link_;
     ServerAddress last_server_;  // relay used for the most recent upload
 
-    void start_send();
+    // The Files tab's send: the relay and the recipient are checked first, then what to send is chosen (files, a folder) or
+    // was dropped. Several files or a folder are packed and sent as one (TransferEngine::upload_files).
+    void choose_and_send(bool folder);
+    void send_paths(const QStringList& paths);
+    bool send_ready();  // the relay and the chosen recipient are usable (says why not if they aren't)
     void start_receive();
     bool setup_keys(std::string& problem);
     bool unlock_keys(std::string& problem);

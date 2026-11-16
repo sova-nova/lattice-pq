@@ -3269,29 +3269,13 @@ bool MessagingEngine::queue_pack(const std::string& conversation, bool group, co
         if (!contact->kem_verified) { error = "Their encryption key isn't verified. Ask them for a new contact card."; return false; }
         if (!contact->can_message()) { error = "You don't have their messaging address yet. Ask them for a new contact card."; return false; }
     }
-    std::optional<file_pack::Plan> plan;
-    if (sources.size() == 1 && fs::is_directory(sources[0], ec)) {
-        plan = file_pack::plan_folder(sources[0], error);
-    } else {
-        // "Files 2026-11-16", in local time.
-        const std::time_t t = static_cast<std::time_t>(unix_now());
-        std::tm local{};
-#ifdef _WIN32
-        localtime_s(&local, &t);
-#else
-        localtime_r(&t, &local);
-#endif
-        char date[16];
-        std::strftime(date, sizeof(date), "%Y-%m-%d", &local);
-        plan = file_pack::plan_items(std::string("Files ") + date, sources, error);
-    }
+    std::optional<file_pack::Plan> plan = file_pack::plan_sources(sources, static_cast<std::time_t>(unix_now()), error);
     if (!plan) return false;
     if (plan->archive_bytes > options_.max_attachment_bytes || plan->archive_bytes > attachment::MAX_PLAINTEXT_BYTES) {
         error = "That's too much to send at once (" + std::to_string(std::min<uint64_t>(options_.max_attachment_bytes, attachment::MAX_PLAINTEXT_BYTES) / (1024 * 1024)) +
                 " MiB at most)";
         return false;
     }
-    if (plan->files == 0) { error = "There are no files in what you chose (empty folders, or only links)"; return false; }
     if (!plan->skipped.empty())
         notify(std::to_string(plan->skipped.size()) + " link(s) or special file(s) were left out of " + plan->root + ": only files and folders are sent");
 

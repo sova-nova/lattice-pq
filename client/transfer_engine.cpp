@@ -2,10 +2,13 @@
 #include "secure_channel.h"
 
 #include "crypto_engine.h"
+#include "file_pack.h"
 #include "protocol.h"
 #include "scope_exit.h"
 
+#include <chrono>
 #include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <stdexcept>
@@ -168,6 +171,7 @@ void TransferEngine::upload_file(const std::string& filepath, const std::string&
     cancel_flag_ = false;
     try {
         upload_impl(filepath, server_host, server_port, recipient);
+        if (on_complete) on_complete(filepath);
     } catch (const TransferCancelled&) {
         if (on_error) on_error("Transfer cancelled");
     } catch (const std::exception& e) {
@@ -179,12 +183,98 @@ void TransferEngine::download_file(const std::string& transfer_id, const std::st
                                    uint16_t server_port, const std::string& output_dir) {
     cancel_flag_ = false;
     try {
-        download_impl(transfer_id, server_host, server_port, output_dir);
+        bool is_pack = false;
+        const fs::path saved = download_impl(transfer_id, server_host, server_port, output_dir, is_pack);
+        if (!is_pack) {
+            if (on_complete) on_complete(saved.u8string());
+            return;
+        }
+        unpack_impl(saved, output_dir);
     } catch (const TransferCancelled&) {
         if (on_error) on_error("Transfer cancelled");
     } catch (const std::exception& e) {
         if (on_error) on_error(e.what());
     }
+}
+
+void TransferEngine::upload_files(const std::vector<std::string>& sources, const std::string& server_host, uint16_t server_port,
+                                  const KeyStore::Contact& recipient, const std::string& work_dir) {
+    cancel_flag_ = false;
+    try {
+        std::error_code ec;
+        if (sources.size() == 1 && fs::is_regular_file(fs::u8path(sources[0]), ec)) {
+            upload_impl(sources[0], server_host, server_port, recipient);
+            if (on_complete) on_complete(sources[0]);
+            return;
+        }
+        const fs::path dir = fs::u8path(work_dir);
+        // Packs left behind by an app that was stopped mid-send (a send takes minutes, not days).
+        const auto stale_before = fs::file_time_type::clock::now() - std::chrono::hours(48);
+        for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+            std::error_code e2;
+            if (it->is_directory(e2) && fs::last_write_time(it->path(), e2) < stale_before && !e2) fs::remove_all(it->path(), e2);
+        }
+        const fs::path job_dir = dir / bytes_to_hex(CryptoEngine::random_bytes(8));
+        auto cleanup = make_scope_exit([&] {
+            std::error_code e2;
+            fs::remove_all(job_dir, e2);
+        });
+        const fs::path pack = pack_impl(sources, job_dir);
+        upload_impl(pack.u8string(), server_host, server_port, recipient);
+        if (on_complete) on_complete(sources.size() == 1 ? sources[0] : std::string());  // the pack itself is about to go
+    } catch (const TransferCancelled&) {
+        if (on_error) on_error("Transfer cancelled");
+    } catch (const std::exception& e) {
+        if (on_error) on_error(e.what());
+    }
+}
+
+fs::path TransferEngine::pack_impl(const std::vector<std::string>& sources, const fs::path& job_dir) {
+    status("Listing what to send...");
+    std::vector<fs::path> paths;
+    for (const auto& s : sources) paths.push_back(fs::u8path(s));
+    std::string error;
+    const auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    auto plan = file_pack::plan_sources(paths, now, error);
+    if (!plan) throw TransferError(error);
+    check_cancelled();
+    std::error_code ec;
+    fs::create_directories(job_dir, ec);
+    if (ec) throw TransferError("Couldn't make a folder to pack the files in: " + ec.message());
+    const fs::path pack = job_dir / fs::u8path(plan->file_name());
+    std::string skipped;
+    if (!plan->skipped.empty())
+        skipped = " (" + std::to_string(plan->skipped.size()) + " link(s) or special file(s) left out: only files and folders are sent)";
+    status("Packing " + plan->root + ": " + std::to_string(plan->files) + (plan->files == 1 ? " file" : " files") + skipped + "...");
+    const bool ok = file_pack::write(*plan, pack, [&](uint64_t done, uint64_t total) {
+        progress(total ? static_cast<double>(done) / static_cast<double>(total) : 1.0);
+        return !cancel_flag_;
+    }, error);
+    check_cancelled();
+    if (!ok) throw TransferError(error);
+    progress(0.0);
+    return pack;
+}
+
+void TransferEngine::unpack_impl(const fs::path& archive, const std::string& output_dir) {
+    status("Unpacking " + archive.filename().u8string() + "...");
+    progress(0.0);
+    std::string why;
+    auto unpacked = file_pack::unpack(archive, fs::u8path(output_dir), [&](uint64_t done, uint64_t total) {
+        progress(total ? static_cast<double>(done) / static_cast<double>(total) : 1.0);
+        return !cancel_flag_;
+    }, why);
+    if (!unpacked) {
+        // The download itself succeeded and the relay's copy is gone: the archive is all there is, so it stays.
+        const std::string what = cancel_flag_ ? std::string("Unpacking was cancelled.") : why;
+        if (on_error) on_error("Received, but not unpacked. " + what + " The files are still packed, in " + archive.u8string() + " (any archive tool opens it)");
+        return;
+    }
+    std::error_code ec;
+    fs::remove(archive, ec);
+    progress(1.0);
+    status("Received " + std::to_string(unpacked->files) + (unpacked->files == 1 ? " file" : " files") + ", saved to " + unpacked->saved.u8string());
+    if (on_complete) on_complete(unpacked->saved.u8string());
 }
 
 const KeyStore& TransferEngine::active_keystore(std::unique_ptr<KeyStore>& fallback) const {
@@ -384,13 +474,12 @@ void TransferEngine::upload_impl(const std::string& filepath, const std::string&
     progress(1.0);
     status("Uploaded " + filename + " for " + recipient.name +
            ". Send them the transfer ID. It works once and expires in 24 hours.");
-    if (on_complete) on_complete(filepath);
 }
 
 // --- Download ---
 
-void TransferEngine::download_impl(const std::string& raw_id, const std::string& host, uint16_t port,
-                                   const std::string& output_dir) {
+fs::path TransferEngine::download_impl(const std::string& raw_id, const std::string& host, uint16_t port,
+                                       const std::string& output_dir, bool& is_pack) {
     // Accept IDs pasted with stray whitespace or in upper case.
     std::string transfer_id;
     for (char c : raw_id) {
@@ -466,6 +555,7 @@ void TransferEngine::download_impl(const std::string& raw_id, const std::string&
         throw TransferError("Signature verification FAILED. The transfer may be forged or tampered with");
 
     std::string safe_name = sanitize_filename(meta->filename);
+    is_pack = file_pack::is_pack_name(safe_name);  // by the name it was sent with, not a "name (1)" it may be saved as
     status("Signature verified, from " + sender_name + ". Receiving " + safe_name + "...");
 
     fs::path out_dir = fs::u8path(output_dir);
@@ -530,5 +620,5 @@ void TransferEngine::download_impl(const std::string& raw_id, const std::string&
 
     progress(1.0);
     status("Received " + final_path.filename().u8string() + " from " + sender_name);
-    if (on_complete) on_complete(final_path.u8string());
+    return final_path;
 }

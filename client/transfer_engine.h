@@ -2,10 +2,12 @@
 
 #include <atomic>
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include "key_store.h"
 #include "platform.h"
@@ -35,8 +37,19 @@ public:
                      uint16_t server_port,
                      const KeyStore::Contact& recipient);
 
+    // Several files, or a folder, sent as one: packed into one file (file_pack, a plain tar archive) in a folder of its
+    // own under `work_dir`, which is uploaded like upload_file and deleted afterwards, whatever happened. One plain file
+    // is sent as itself. A snapshot: the files are read once, while packing; cancel() stops the packing too.
+    void upload_files(const std::vector<std::string>& sources,
+                      const std::string& server_host,
+                      uint16_t server_port,
+                      const KeyStore::Contact& recipient,
+                      const std::string& work_dir);
+
     // Downloads a transfer, verifies the sender against the contact list,
     // decrypts it into `output_dir` (UTF-8), then tells the relay to delete it.
+    // Files sent together (a pack, by its name) are then unpacked into a folder there and the archive removed; if that
+    // fails or is cancelled, the archive is kept and on_error says where (on_complete is not called then).
     void download_file(const std::string& transfer_id,
                        const std::string& server_host,
                        uint16_t server_port,
@@ -68,8 +81,10 @@ private:
 
     void upload_impl(const std::string& filepath, const std::string& host, uint16_t port,
                      const KeyStore::Contact& recipient);
-    void download_impl(const std::string& transfer_id, const std::string& host, uint16_t port,
-                       const std::string& output_dir);
+    std::filesystem::path download_impl(const std::string& transfer_id, const std::string& host, uint16_t port,
+                                        const std::string& output_dir, bool& is_pack);
+    std::filesystem::path pack_impl(const std::vector<std::string>& sources, const std::filesystem::path& job_dir);
+    void unpack_impl(const std::filesystem::path& archive, const std::string& output_dir);
 
     socket_t connect_to_server(const std::string& host, uint16_t port);
     void release_socket(socket_t sock);

@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <fstream>
 #include <istream>
 #include <set>
@@ -429,6 +430,29 @@ std::optional<Plan> plan_items(const std::string& root_name, const std::vector<f
     }
     if (!planner.finish()) return std::nullopt;
     return std::move(planner.plan);
+}
+
+std::optional<Plan> plan_sources(const std::vector<fs::path>& sources, std::time_t now, std::string& error) {
+    std::error_code ec;
+    std::optional<Plan> plan;
+    if (sources.size() == 1 && fs::is_directory(sources[0], ec)) {
+        plan = plan_folder(sources[0], error);
+    } else {
+        std::tm local{};
+#ifdef _WIN32
+        localtime_s(&local, &now);
+#else
+        localtime_r(&now, &local);
+#endif
+        char date[16];
+        std::strftime(date, sizeof(date), "%Y-%m-%d", &local);
+        plan = plan_items(std::string("Files ") + date, sources, error);
+    }
+    if (plan && plan->files == 0) {
+        error = "There are no files in what you chose (empty folders, or only links)";
+        return std::nullopt;
+    }
+    return plan;
 }
 
 bool write(const Plan& plan, const fs::path& out, const Progress& progress, std::string& error, Bytes* sha256) {
