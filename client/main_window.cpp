@@ -419,6 +419,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         tabs_->setTabText(tabs_->indexOf(chat_widget_), unread ? QString("Chats (%1)").arg(static_cast<qulonglong>(unread)) : QString("Chats"));
     });
     connect(tabs, &QTabWidget::currentChanged, this, [this](int) {
+        if (!chat_widget_) return;
         chat_widget_->refresh_now();
         refresh_home();
     });
@@ -441,9 +442,15 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 MainWindow::~MainWindow() {
     // The Chats tab's worker thread uses the key store. Qt would delete the tab only after this
     // window's members (including the key store) are gone, so stop and delete it here, first.
+    //
+    // Deleting the tab makes the QTabWidget remove its page, which emits currentChanged while the
+    // ChatWidget is half destroyed (its child widgets already gone). So stop listening to the tabs
+    // first, and clear the pointer before the delete so nothing reached from here can use it.
     if (chat_widget_) {
-        delete chat_widget_;
+        if (tabs_) disconnect(tabs_, nullptr, this, nullptr);
+        ChatWidget* chats = chat_widget_;
         chat_widget_ = nullptr;
+        delete chats;
     }
     engine_.cancel();
     if (worker_thread_.joinable()) worker_thread_.join();
