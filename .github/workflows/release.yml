@@ -20,6 +20,17 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # The app compares its own version with the latest release to tell people about updates, so a release whose tag
+      # doesn't match the version in CMakeLists.txt would tell everyone (forever) that they are out of date.
+      - name: Tag matches the app version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          VERSION=$(sed -n 's/^project(pq-file-transfer VERSION \([0-9.]*\) .*/\1/p' CMakeLists.txt)
+          if [ "v$VERSION" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match the version in CMakeLists.txt ($VERSION). Bump project(... VERSION) first."
+            exit 1
+          fi
+
       - name: System packages
         run: |
           sudo apt-get update
@@ -92,6 +103,10 @@ jobs:
           chmod +x linuxdeploy*.AppImage
           export QMAKE="$QT_ROOT_DIR/bin/qmake"
           export LD_LIBRARY_PATH="$QT_ROOT_DIR/lib:$LD_LIBRARY_PATH"
+          # The update check uses HTTPS, which needs Qt's TLS backend plugin (it loads the system's OpenSSL at run time).
+          # Bundle it explicitly in case the Qt plugin for linuxdeploy doesn't.
+          mkdir -p AppDir/usr/plugins/tls
+          cp "$QT_ROOT_DIR"/plugins/tls/libqopensslbackend.so AppDir/usr/plugins/tls/
           ./linuxdeploy-x86_64.AppImage --appdir AppDir \
             --executable build/pq-client \
             --desktop-file packaging/pq-client.desktop \

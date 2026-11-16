@@ -1,5 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
-project(pq-file-transfer VERSION 0.7.0 LANGUAGES CXX)
+# The app version. The update check compares it with the latest GitHub release, and the release workflow refuses a
+# tag that doesn't match it: bump it before tagging.
+project(pq-file-transfer VERSION 1.2.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -110,7 +112,10 @@ add_library(pq_core STATIC
     client/envelope.cpp
     client/history_store.cpp
     client/messaging_engine.cpp
+    client/update_check.cpp
 )
+# Only this file needs the version, so bumping it doesn't rebuild the whole library.
+set_property(SOURCE client/update_check.cpp APPEND PROPERTY COMPILE_DEFINITIONS PQ_APP_VERSION="${PROJECT_VERSION}")
 target_include_directories(pq_core PUBLIC ${CMAKE_SOURCE_DIR}/client)
 target_link_libraries(pq_core PUBLIC pq_crypto protocol Threads::Threads OpenSSL::Crypto ${PQ_SQLITE_TARGET})
 pq_warnings(pq_core)
@@ -123,7 +128,8 @@ pq_warnings(pq-relay-check)
 # --- Qt GUI client ---
 if(PQ_BUILD_CLIENT)
     set(CMAKE_AUTOMOC ON)
-    find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets)
+    # Network: the update check (one HTTPS request to GitHub's releases API; nothing is downloaded).
+    find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Network)
 
     add_executable(pq-client
         client/main.cpp
@@ -140,7 +146,7 @@ if(PQ_BUILD_CLIENT)
         packaging/pq-client.qrc
     )
     set_target_properties(pq-client PROPERTIES AUTORCC ON)
-    target_link_libraries(pq-client PRIVATE pq_core Qt6::Core Qt6::Gui Qt6::Widgets)
+    target_link_libraries(pq-client PRIVATE pq_core Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Network)
     # Icons (UX polish) need Qt's SVG module. Optional: without it the app builds and works the same, just without icons.
     find_package(Qt6 QUIET COMPONENTS Svg)
     if(TARGET Qt6::Svg)
@@ -225,6 +231,11 @@ if(PQ_BUILD_TESTS)
     target_link_libraries(pq-test-relay-protocol PRIVATE pq_core)
     pq_warnings(pq-test-relay-protocol)
     add_test(NAME relay_protocol COMMAND pq-test-relay-protocol)
+
+    add_executable(pq-test-update-check tests/test_update_check.cpp)
+    target_link_libraries(pq-test-update-check PRIVATE pq_core)
+    pq_warnings(pq-test-update-check)
+    add_test(NAME update_check COMMAND pq-test-update-check)
 
     # These switch $HOME, use temporary directories or start processes (fork/exec), so POSIX only.
     if(NOT WIN32)

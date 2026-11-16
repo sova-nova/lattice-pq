@@ -22,6 +22,9 @@ class QTabWidget;
 class QGroupBox;
 class QVBoxLayout;
 class QLabel;
+class QNetworkAccessManager;
+class QNetworkReply;
+class QTimer;
 class QLineEdit;
 class QProgressBar;
 class QPushButton;
@@ -98,6 +101,18 @@ private:
     QLabel* home_chats_text_ = nullptr;  // the Open chats tile's second line: the unread count
     QListWidget* home_recent_ = nullptr;
     QLabel* home_recent_empty_ = nullptr;
+    // The update check: asks GitHub for the latest release's version, shows a banner on Home and points at the releases page.
+    // Never downloads anything. Automatic checks are at most daily and can be turned off in Settings.
+    void check_for_updates(bool user_asked);
+    void finish_update_check();
+    void update_update_banner();  // from the last check's result (kept in QSettings)
+    QNetworkAccessManager* network_ = nullptr;  // made on the first check
+    QNetworkReply* update_reply_ = nullptr;     // the check in progress, if any
+    bool update_user_waiting_ = false;          // someone pressed "Check now": say how it went
+    QTimer* update_timer_ = nullptr;            // hourly: is an automatic check due?
+    QWidget* home_update_ = nullptr;            // the Home banner, shown only when a newer version exists
+    QLabel* home_update_text_ = nullptr;
+    QPushButton* settings_check_now_button_ = nullptr;
     QString home_signature_;  // what Home last showed, so it is only redrawn when something changed
     // UX step 4: the guided Files tab.
     QLineEdit* receive_edit_ = nullptr;        // the Receive card's paste box

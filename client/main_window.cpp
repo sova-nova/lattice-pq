@@ -7,9 +7,18 @@
 #include "chat_widget.h"
 #include "key_dialogs.h"
 #include "keychain.h"
+#include "update_check.h"
 #include "protocol.h"  // bytes_to_hex, hex_to_bytes (the Files tab's remembered relay IDs)
 
 #include <QAction>
+#include <QCheckBox>
+#include <QDateTime>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
+#include <QSslSocket>
 #include <QSizePolicy>
 #include <QTimer>
 #include <QStackedWidget>
@@ -100,6 +109,12 @@ QLabel* plain_label(const QString& text, QWidget* parent) {
 }
 
 }  // namespace
+
+// The update check's settings.
+static const char* const UPDATES_AUTOMATIC = "updates/automatic";    // bool, default on
+static const char* const UPDATES_LAST_CHECK = "updates/last_check";  // seconds since the epoch
+static const char* const UPDATES_LATEST = "updates/latest";          // the newest version seen, "1.3.0"
+static const char* const UPDATES_DISMISSED = "updates/dismissed";    // the version whose banner was closed with "Not now"
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     setWindowTitle("Lattice");
@@ -400,6 +415,45 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(settings_invites_button_, &QPushButton::clicked, this, [this] { settings_dialog_->accept(); chat_widget_->open_relay_invites(); });
     connect(settings_cards_button_, &QPushButton::clicked, this, [this] { settings_dialog_->accept(); chat_widget_->open_cards_issued(); });
     connect(settings_restore_button_, &QPushButton::clicked, this, [this] { settings_dialog_->accept(); chat_widget_->open_restore(); });
+    auto* updates_box = new QGroupBox("Updates", settings_dialog_);
+    auto* updates_layout = new QVBoxLayout(updates_box);
+    // No wrapped text in this box: Qt sizes the Settings dialog without allowing for wrapping, so a wrapped line gets
+    // squeezed and the buttons pushed against the border. A longer line widens the dialog instead.
+    auto* version_label = plain_label(QString("You're using Lattice %1.").arg(update_check::current_version_string()), updates_box);
+    version_label->setWordWrap(false);
+    updates_layout->addWidget(version_label);
+    auto* automatic = new QCheckBox("Check for a new version once a day", updates_box);
+    automatic->setToolTip("Asks GitHub which version is the latest. Nothing is downloaded or installed; you choose whether to get it.");
+    automatic->setChecked(QSettings().value(UPDATES_AUTOMATIC, true).toBool());
+    updates_layout->addWidget(automatic);
+    auto* updates_note = plain_label("GitHub sees your IP address when the app checks. Nothing is ever downloaded.", updates_box);
+    updates_note->setWordWrap(false);
+    updates_note->setProperty("role", "muted");
+    updates_note->setContentsMargins(26, 0, 0, 0);  // under the checkbox's text: it explains that option
+    updates_layout->addWidget(updates_note);
+    auto* updates_buttons = new QHBoxLayout();
+    settings_check_now_button_ = new QPushButton("Check now", updates_box);
+    auto* releases_button = new QPushButton("Open the releases page", updates_box);
+    auto* copy_releases_button = new QPushButton("Copy link", updates_box);
+    copy_releases_button->setToolTip(QString("Copy the releases page's address (%1)").arg(update_check::RELEASES_PAGE));
+    updates_buttons->addWidget(settings_check_now_button_);
+    updates_buttons->addWidget(releases_button);
+    updates_buttons->addWidget(copy_releases_button);
+    updates_buttons->addStretch(1);
+    updates_layout->addLayout(updates_buttons);
+    settings_layout_->addWidget(updates_box);
+    connect(automatic, &QCheckBox::toggled, this, [this](bool on) {
+        QSettings().setValue(UPDATES_AUTOMATIC, on);
+        if (on && update_check::check_due(QSettings().value(UPDATES_LAST_CHECK, 0).toLongLong(), QDateTime::currentSecsSinceEpoch()))
+            check_for_updates(false);
+    });
+    connect(settings_check_now_button_, &QPushButton::clicked, this, [this] { check_for_updates(true); });
+    connect(releases_button, &QPushButton::clicked, this, [] { QDesktopServices::openUrl(QUrl(update_check::RELEASES_PAGE)); });
+    connect(copy_releases_button, &QPushButton::clicked, this, [copy_releases_button] {
+        QGuiApplication::clipboard()->setText(update_check::RELEASES_PAGE);
+        copy_releases_button->setText("Copied");
+        QTimer::singleShot(2000, copy_releases_button, [copy_releases_button] { copy_releases_button->setText("Copy link"); });
+    });
     auto* close_row = new QHBoxLayout();
     close_row->addStretch(1);
     auto* close_button = new QPushButton("Close", settings_dialog_);
@@ -425,6 +479,19 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     });
     build_home();
     chat_widget_->set_on_changed([this] { refresh_home(); });
+    // Updates: show what the last check found, then check if one is due (a few seconds in, so startup isn't held up),
+    // and look again every hour for as long as the app stays open.
+    update_update_banner();
+    update_timer_ = new QTimer(this);
+    update_timer_->setInterval(60 * 60 * 1000);
+    auto maybe_check = [this] {
+        if (QSettings().value(UPDATES_AUTOMATIC, true).toBool() &&
+            update_check::check_due(QSettings().value(UPDATES_LAST_CHECK, 0).toLongLong(), QDateTime::currentSecsSinceEpoch()))
+            check_for_updates(false);
+    };
+    connect(update_timer_, &QTimer::timeout, this, maybe_check);
+    update_timer_->start();
+    QTimer::singleShot(5000, this, maybe_check);
     // What a new user chose in the first-run guide, now that the window (and the Chats tab) exist.
     if (!pending_invite_.isEmpty() || pending_add_contact_) {
         QTimer::singleShot(0, this, [this] {
@@ -440,6 +507,13 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 }
 
 MainWindow::~MainWindow() {
+    // An update check still in progress: aborting it emits finished, so stop listening first.
+    if (update_reply_) {
+        QNetworkReply* reply = update_reply_;
+        update_reply_ = nullptr;
+        disconnect(reply, nullptr, this, nullptr);
+        reply->abort();
+    }
     // The Chats tab's worker thread uses the key store. Qt would delete the tab only after this
     // window's members (including the key store) are gone, so stop and delete it here, first.
     //
@@ -729,6 +803,28 @@ void MainWindow::build_home() {
     home_waiting_->setVisible(false);
     layout->addWidget(home_waiting_);
 
+    home_update_ = new QWidget(home_page_);
+    home_update_->setProperty("role", "info-banner");
+    home_update_->setAttribute(Qt::WA_StyledBackground, true);
+    auto* update_layout = new QHBoxLayout(home_update_);
+    update_layout->setContentsMargins(12, 6, 6, 6);
+    home_update_text_ = plain_label("", home_update_);
+    home_update_text_->setWordWrap(true);
+    auto* get_update = new QPushButton("Get it on GitHub", home_update_);
+    get_update->setToolTip("Opens the releases page in your browser. Nothing is downloaded automatically.");
+    auto* not_now = new QPushButton("Not now", home_update_);
+    not_now->setToolTip("Hide this until there is an even newer version");
+    connect(get_update, &QPushButton::clicked, this, [] { QDesktopServices::openUrl(QUrl(update_check::RELEASES_PAGE)); });
+    connect(not_now, &QPushButton::clicked, this, [this] {
+        QSettings().setValue(UPDATES_DISMISSED, QSettings().value(UPDATES_LATEST).toString());
+        update_update_banner();
+    });
+    update_layout->addWidget(home_update_text_, 1);
+    update_layout->addWidget(get_update);
+    update_layout->addWidget(not_now);
+    home_update_->setVisible(false);
+    layout->addWidget(home_update_);
+
     // Four tiles of equal width: an icon, a bold title, and a muted line saying what it's for. The labels let clicks through
     // to the tile, which is a real button (keyboard focus, Enter, Space).
     auto* actions = new QHBoxLayout();
@@ -782,7 +878,9 @@ void MainWindow::build_home() {
     recent_heading->setProperty("role", "section");
     layout->addWidget(recent_heading);
     home_recent_ = new QListWidget(home_page_);
-    home_recent_->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    // The list takes whatever height Home has spare (banners coming and going, a resized window), so the page is never
+    // left with empty space at the bottom; past its chats it scrolls.
+    home_recent_->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
     connect(home_recent_, &QListWidget::itemActivated, this, [this](QListWidgetItem* item) {
         if (!item) return;
         chat_widget_->open_conversation(item->data(Qt::UserRole).toString());
@@ -793,11 +891,11 @@ void MainWindow::build_home() {
         chat_widget_->open_conversation(item->data(Qt::UserRole).toString());
         tabs_->setCurrentWidget(chat_widget_);
     });
-    layout->addWidget(home_recent_);
+    layout->addWidget(home_recent_, 1);
     home_recent_empty_ = plain_label("No chats yet. Use Add contact to swap contact cards with someone, and your chats will appear here.", home_page_);
     home_recent_empty_->setWordWrap(true);
     layout->addWidget(home_recent_empty_);
-    layout->addStretch();
+    layout->addStretch();  // only takes space while there are no chats (the list, stretch 1, gets it otherwise)
 
     // Home first, then Chats, then Files; the app opens on Home.
     tabs_->insertTab(0, home_page_, "Home");
@@ -813,7 +911,7 @@ void MainWindow::refresh_home() {
     const QString status = chat_widget_->messaging_status();
     const QString waiting = chat_widget_->waiting_summary();
     const size_t unread = chat_widget_->unread_total();
-    const auto recent = chat_widget_->recent_entries(5);
+    const auto recent = chat_widget_->recent_entries(20);  // enough to fill a tall window; the list scrolls past that
     QString signature = status + "|" + waiting + "|" + QString::number(static_cast<qulonglong>(unread)) + (set_up ? "|1" : "|0");
     for (const auto& r : recent) signature += "|" + r.key + "=" + r.title + "/" + r.subtitle + "/" + QString::number(static_cast<qulonglong>(r.unread)) + "/" + QString::number(static_cast<qlonglong>(r.when));
     if (signature == home_signature_) return;  // nothing changed: leave it alone
@@ -830,7 +928,8 @@ void MainWindow::refresh_home() {
     home_waiting_->setVisible(!waiting.isEmpty());
     home_chats_text_->setText(unread ? QString("%1 unread").arg(static_cast<qulonglong>(unread)) : QString("Nothing new"));
     fill_chat_list(home_recent_, recent);
-    home_recent_->setFixedHeight(static_cast<int>(recent.size()) * 62 + 12);  // as tall as its chats, no taller
+    // However short the window, at least two chats stay in view (rows are 62 px).
+    home_recent_->setMinimumHeight(static_cast<int>(std::min<size_t>(recent.size(), 2)) * 62 + 12);
     home_recent_->setVisible(!recent.empty());
     home_recent_empty_->setVisible(recent.empty());
 }
@@ -1568,4 +1667,103 @@ void MainWindow::show_transfer_id(const std::string& id) {
     copy_link_button_->setEnabled(true);
     copy_id_button_->setEnabled(true);
     if (result_box_) result_box_->setVisible(true);
+}
+
+// --- Update check ---
+
+void MainWindow::check_for_updates(bool user_asked) {
+    if (update_reply_) {  // one already running: report it when it ends
+        update_user_waiting_ = update_user_waiting_ || user_asked;
+        return;
+    }
+    if (!QSslSocket::supportsSsl()) {
+        if (user_asked)
+            QMessageBox::warning(this, "Check for updates",
+                                 "This copy of Lattice can't make secure web connections (Qt's TLS support is missing), so it "
+                                 "can't check. You can still look at the releases page yourself.");
+        return;
+    }
+    if (!network_) network_ = new QNetworkAccessManager(this);
+    QNetworkRequest request{QUrl(update_check::LATEST_RELEASE_API)};
+    // GitHub requires a User-Agent. A generic one: no names, no identity, just the app and its version.
+    request.setHeader(QNetworkRequest::UserAgentHeader, QString("Lattice/%1").arg(update_check::current_version_string()));
+    request.setRawHeader("Accept", "application/vnd.github+json");
+    request.setTransferTimeout(15000);
+    update_user_waiting_ = user_asked;
+    if (settings_check_now_button_) {
+        settings_check_now_button_->setEnabled(false);
+        settings_check_now_button_->setText("Checking…");
+    }
+    update_reply_ = network_->get(request);
+    connect(update_reply_, &QNetworkReply::finished, this, [this] { finish_update_check(); });
+}
+
+void MainWindow::finish_update_check() {
+    QNetworkReply* reply = update_reply_;
+    update_reply_ = nullptr;
+    if (!reply) return;
+    reply->deleteLater();
+    if (settings_check_now_button_) {
+        settings_check_now_button_->setEnabled(true);
+        settings_check_now_button_->setText("Check now");
+    }
+    // Counted even when it failed, so a broken network or GitHub outage doesn't mean a request every hour.
+    QSettings().setValue(UPDATES_LAST_CHECK, QDateTime::currentSecsSinceEpoch());
+
+    constexpr qint64 MAX_REPLY_BYTES = 1024 * 1024;  // a release's description is a few KiB
+    QString problem;
+    std::optional<update_check::Version> latest;
+    const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    if (reply->error() != QNetworkReply::NoError) {
+        problem = reply->errorString();
+    } else if (status != 200) {
+        problem = QString("GitHub answered with status %1.").arg(status);
+    } else {
+        const QByteArray body = reply->read(MAX_REPLY_BYTES + 1);
+        if (body.size() > MAX_REPLY_BYTES) {
+            problem = "GitHub's answer was unexpectedly large.";
+        } else {
+            const QString tag = QJsonDocument::fromJson(body).object().value("tag_name").toString();
+            latest = update_check::parse_version(tag.toStdString());
+            if (!latest) problem = "GitHub's answer didn't contain a version number this app understands.";
+        }
+    }
+    if (latest) QSettings().setValue(UPDATES_LATEST, QString::fromStdString(update_check::to_string(*latest)));
+    const bool newer = latest && update_check::is_newer(*latest, update_check::current_version());
+    if (newer && update_user_waiting_) QSettings().remove(UPDATES_DISMISSED);  // asked on purpose: show the banner again
+    update_update_banner();
+
+    if (!update_user_waiting_) return;
+    update_user_waiting_ = false;
+    const QString current = update_check::current_version_string();
+    if (!problem.isEmpty()) {
+        QMessageBox::warning(this, "Check for updates", "Couldn't check for a new version: " + problem.toHtmlEscaped());
+    } else if (newer) {
+        QMessageBox box(QMessageBox::Information, "Check for updates",
+                        QString("Lattice %1 is available. You have %2.\n\nGet it from the releases page on GitHub. "
+                                "Nothing is downloaded automatically.")
+                            .arg(QString::fromStdString(update_check::to_string(*latest)), current),
+                        QMessageBox::NoButton, this);
+        box.setTextFormat(Qt::PlainText);
+        QPushButton* get = box.addButton("Get it on GitHub", QMessageBox::AcceptRole);
+        box.addButton("Later", QMessageBox::RejectRole);
+        box.exec();
+        if (box.clickedButton() == get) QDesktopServices::openUrl(QUrl(update_check::RELEASES_PAGE));
+    } else {
+        QMessageBox::information(this, "Check for updates", QString("You have the latest version (%1).").arg(current));
+    }
+}
+
+void MainWindow::update_update_banner() {
+    if (!home_update_) return;
+    QSettings settings;
+    const QString latest_text = settings.value(UPDATES_LATEST).toString();
+    const auto latest = update_check::parse_version(latest_text.toStdString());
+    const bool show = latest && update_check::is_newer(*latest, update_check::current_version()) &&
+                      settings.value(UPDATES_DISMISSED).toString() != latest_text;
+    if (show)
+        home_update_text_->setText(QString("Lattice %1 is available. You have %2.")
+                                       .arg(QString::fromStdString(update_check::to_string(*latest)),
+                                            update_check::current_version_string()));
+    home_update_->setVisible(show);
 }

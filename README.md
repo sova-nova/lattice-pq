@@ -19,6 +19,8 @@ A Files-tab transfer works like this. The sender uploads and receives a **transf
 
 Download it from the releases page (an AppImage for Linux, a zip for Windows), or [build it yourself](#building). On Linux, building and installing also puts **Lattice** in your app menu.
 
+**Updates.** Once a day Lattice asks GitHub which version is the latest. When a newer one exists, Home shows a banner with **Get it on GitHub**, which opens the releases page in your browser. Nothing is ever downloaded or installed automatically. **Settings → Updates** shows your version and has **Check now**, plus **Copy link**, which copies the releases page's address so you can paste it. You can also turn the daily check off there: each check is a request to GitHub, so GitHub sees your IP address. Your relay isn't involved in this.
+
 Messaging needs a relay: someone runs one (see [running a relay](#running-a-relay)) and gives you an invite. Sending a file from the Files tab needs only a relay's address.
 
 ### First start
