@@ -16,6 +16,7 @@ treat the suite as promising but unaudited.
 | **A contact or group member** | Everything a member legitimately sees | They can of course keep, copy or forward what you send them. They can't impersonate another member, write into a chat they aren't in, change a Private chat's rule, retract someone else's message, or point you at a relay that isn't theirs for an attachment. |
 | **Someone who steals a device later** | The app's files | With the passphrase (or an unlocked OS keychain): the saved history and archives. Without it: nothing readable. Either way, **not** envelopes captured earlier from the network or relay (forward secrecy, M6), and not Private messages that have already expired. |
 | **Someone who sends you a file** | A file with any name and contents | A safe, non-overwriting file name in the folder you choose, saved only after it matches what the sender signed. Files are never opened automatically. The contents can still be harmful if you open them. |
+| **Someone who sends you files or a folder together** | A packed archive (tar) whose contents they choose | Unpacked only after the whole archive matches what the sender signed and passes strict checks: only plain files and folders, relative names under one top folder, nothing that climbs out of it, no links or devices, limits on count, depth, path length and size. It is unpacked into a hidden folder and renamed into place only if everything succeeded. An archive that fails is kept, not unpacked. As with single files, the contents can still be harmful if you open them. |
 
 ## What is protected
 
@@ -30,6 +31,7 @@ treat the suite as promising but unaudited.
 ## What is not protected
 
 - **Metadata**: the relay sees mailboxes, sizes, timing and IP addresses; a network observer sees sizes and timing.
+- **The update check**: once a day (unless turned off in Settings → Updates) the app asks GitHub's API which release is the latest, over HTTPS, with the User-Agent `Lattice/<version>`. GitHub sees your IP address and the app's version. Nothing is downloaded or installed, the releases page it opens is fixed in the app (never taken from the reply), and the relay isn't involved.
 - **Availability**: a relay (or the network) can drop or delay anything.
 - **Archives are not forward-secret**: a chat's archive is encrypted under a key every member holds; someone who later steals one member's device and passphrase can read that chat's archive from the relay.
 - **What people do with what they receive**: copies, screenshots, exports, or a modified app. Private chats can't prevent these.
@@ -56,13 +58,14 @@ treat the suite as promising but unaudited.
 
 ## Reporting a problem
 
-**Please report security problems privately**, not in a public issue: <!-- MAINTAINER: add a contact address or private reporting channel here -->
-*(contact to be added by the maintainer)*. Include what you found, how to reproduce it, and what you think the impact is.
+**Please report security problems privately**, not in a public issue: use GitHub's private vulnerability reporting on this
+repository (the **Security** tab, then **Report a vulnerability**). Only the maintainer sees the report. Include what you
+found, how to reproduce it, and what you think the impact is.
 We will acknowledge the report, work on a fix, and credit you if you wish.
 
 ## Testing
 
-About 2,110 automated checks across twelve suites, including hostile relays, hostile group members, tampered and replayed
-data, forged keys and lost devices; all of them also pass under AddressSanitizer and UndefinedBehaviorSanitizer with leak
+Over 2,100 automated checks across fourteen suites, including hostile relays, hostile group members, tampered and replayed
+data, forged keys, lost devices and hostile archives of files sent together; all of them also pass under AddressSanitizer and UndefinedBehaviorSanitizer with leak
 detection (`-DPQ_SANITIZE=ON`). Every parser of someone else's data is fuzzed (`fuzz/`; `pq-fuzz`, or `pq-libfuzzer` with
 clang via `-DPQ_FUZZ=ON`). See `HANDOFF.md` for the details of each milestone.

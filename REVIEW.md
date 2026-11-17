@@ -7,8 +7,9 @@ has the reasoning behind each milestone (M0 to M8) and every departure from the 
 ## Building and testing
 
 - Dependencies: OpenSSL 3, liboqs (ML-KEM-768, ML-DSA-65), SQLite 3, Qt 6 (app only).
-- Tests: `cmake -B build -DPQ_BUILD_TESTS=ON && cmake --build build && ctest --test-dir build --output-on-failure` (about 2,110
-  checks; the group suite takes about 12 minutes; the integration suites start real relays on local ports, run them one at a time).
+- Tests: `cmake -B build -DPQ_BUILD_TESTS=ON && cmake --build build && ctest --test-dir build --output-on-failure` (over 2,100
+  checks in fourteen suites; the group suite takes about twenty minutes; the integration suites start real relays on local ports,
+  so run them one at a time).
 - Sanitizers: add `-DPQ_SANITIZE=ON` (GCC or Clang); build with few parallel jobs, as it needs a lot of memory.
 - Fuzzing: `pq-fuzz --seconds N` (any compiler; build with `PQ_SANITIZE`), or `-DPQ_FUZZ=ON` with clang for `pq-libfuzzer`
   (coverage-guided; the stronger tool). `fuzz/fuzz_targets.h` explains the one input format.
@@ -35,6 +36,8 @@ has the reasoning behind each milestone (M0 to M8) and every departure from the 
 | Attachments (chunk encryption, streaming, file names) | `client/attachment.{h,cpp}` |
 | Private chats store | `client/private_store.{h,cpp}` |
 | Older transfer-ID file transfer (v2 protocol) | `client/transfer_engine.{h,cpp}`, `server/main.cpp` |
+| Files and folders sent together: packing and strict unpacking (tar) | `client/file_pack.{h,cpp}`, plus the engine and `transfer_engine` |
+| Update check (version comparison; the HTTPS request is in the main window) | `client/update_check.{h,cpp}`, `client/main_window.cpp` |
 
 ## The cryptographic constructions
 
@@ -58,11 +61,20 @@ has the reasoning behind each milestone (M0 to M8) and every departure from the 
 3. **Envelope v2 and prekeys** (#3, #4): the key derivation; prekey signature verification on the sender's side; deleting a used one-time key only after the message is stored (ordering against crashes); the fallback to v1 (a hostile relay can force it; the sender is warned only for contacts that have had prekeys before).
 4. **Groups**: membership changes, introductions of members who can't reach each other directly (relayed by the creator; these grants stay v1), send tokens per member.
 5. **Archives** (#7): chain verification across tombstones, checkpoint comparison, the relay computing the chain, deletion by agreement (every member's signature over the exact order).
-6. **Attachments** (#9): the nonce-from-chunk-number argument, the hash check before saving, file name sanitizing (`sanitize_filename`, `unique_path`; the free-name check and the rename are not atomic), that a file's relay must be the sender's own.
-7. **Keys at rest** (#10): scrypt parameters, the local-key labels, what a stolen device without the passphrase yields.
-8. **The relay**: sign-in, send tokens, rate limits and quotas (denial of service), the hourly prekey allowance, revocation of waiting envelopes.
-9. **Secure deletion assumptions**: SQLite `secure_delete` with an in-memory journal for the prekey and private stores; the limits of this on SSDs.
-10. **Parsers**: all are fuzzed and strict (canonical round trips), but a reviewer's eye on the length handling is still welcome.
+6. **Unpacking files sent together** (`file_pack.cpp`; new in 1.3.0): the one place where someone else's data decides which
+   files and folders are created on disk. The archive is verified as a whole first (#9), then every tar header must match what our
+   own writer would produce, byte for byte; paths must stay under one top folder (no `..`, absolute paths, links, devices, case-only
+   duplicates); there are limits on entries, depth, path length and total size; and it is unpacked into a hidden folder that is
+   renamed into place only on success. Worth checking: the header comparison and the pax path records, the name rules on Windows
+   and macOS (case-insensitive file systems), what an interrupted unpack leaves, and the time between checking and writing.
+7. **Attachments** (#9): the nonce-from-chunk-number argument, the hash check before saving, file name sanitizing (`sanitize_filename`, `unique_path`; the free-name check and the rename are not atomic), that a file's relay must be the sender's own.
+8. **Keys at rest** (#10): scrypt parameters, the local-key labels, what a stolen device without the passphrase yields.
+9. **The relay**: sign-in, send tokens, rate limits and quotas (denial of service), the hourly prekey allowance, revocation of waiting envelopes.
+10. **Secure deletion assumptions**: SQLite `secure_delete` with an in-memory journal for the prekey and private stores; the limits of this on SSDs.
+11. **Parsers**: all are fuzzed and strict (canonical round trips), but a reviewer's eye on the length handling is still welcome.
+12. **The update check** (`update_check.cpp`, `MainWindow::check_for_updates`): the app's only connection to a third party. It reads
+    one version string from GitHub's JSON reply and compares it; it never downloads anything, and the page it opens is a constant.
+    Worth checking: that nothing else from the reply is used, and that a malformed or hostile reply only means "no update".
 
 ## Decisions a reviewer may want to challenge
 
